@@ -1,0 +1,15 @@
+.env
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.db-migration
+palbot.log
+*.log
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store
+.vscode/
+.idea/
