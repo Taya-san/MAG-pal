@@ -23,6 +23,8 @@ from collections import Counter
 # If you find a word is being incorrectly filtered, add it here.
 # If you find a word is NOT being filtered that should be, add it here.
 
+# English stopwords + Indonesian stopwords for mixed-language use.
+
 STOPWORDS = {
     "the", "a", "an", "is", "was", "are", "were", "be", "been", "being",
     "i", "you", "he", "she", "it", "we", "they", "me", "him", "her",
@@ -62,6 +64,53 @@ STOPWORDS = {
     "im", "ive", "id", "youre", "youve", "youll", "theyll",
     "its", "thats", "whats", "whos", "wheres", "theres", "heres",
     "hes", "shes",
+
+    # === Indonesian stopwords ===
+
+    # pronouns
+    "aku", "saya", "kamu", "dia", "ia", "mereka", "kami", "kita",
+    "anda", "engkau", "kau", "ku", "mu", "nya",
+
+    # demonstratives
+    "ini", "itu", "sini", "situ", "sana",
+
+    # question words
+    "apa", "siapa", "kenapa", "mengapa", "bagaimana", "kapan",
+    "dimana", "kemana", "darimana", "yang", "mana",
+
+    # conjunctions
+    "dan", "atau", "tapi", "tetapi", "namun", "sedangkan",
+    "sementara", "lalu", "kemudian", "makanya", "sehingga",
+    "maka", "agar", "supaya", "karena", "sebab", "oleh", "sebab",
+    "jika", "kalau", "bila", "apabila", "meski", "meskipun",
+    "walaupun", "biar", "kendati",
+
+    # prepositions
+    "di", "ke", "dari", "pada", "kepada", "bagi", "untuk",
+    "dengan", "tanpa", "tentang", "mengenai", "dalam", "antara",
+    "seperti", "bagai", "ibarat", "selama", "hingga", "sampai",
+    "sejak", "menuju", "oleh",
+
+    # adverbial / negation
+    "tidak", "tak", "bukan", "jangan", "tiada",
+
+    # common particles
+    "pun", "kah", "lah", "yah", "deh", "dong", "sih",
+    "kok", "loh", "lho", "kan",
+
+    # formal/linking words
+    "hal", "bahwa", "yakni", "yaitu", "dll", "dkk",
+    "dsb", "adapun", "mengenai", "terkait",
+
+    # indonesian slang / filler words
+    "gue", "gw", "lu", "elo", "lo", "kalo", "kalau",
+    "banget", "bgt", "dah", "udah", "emang", "memang",
+    "doang", "aja", "saja", "nih", "tuh", "ituh",
+    "gini", "gitu", "begitu", "begini",
+    "cuma", "cuman",
+    "nggak", "gak", "ga", "enggak", "kaga", "gk",
+    "iya", "iyh", "ya", "y", "ok", "oke", "okelah",
+    "sip",
 }
 
 

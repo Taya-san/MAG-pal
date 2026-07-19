@@ -222,14 +222,15 @@ class Database:
 
     async def update_session_summary(self, channel_id: str, summary: str):
         # Saves an AI-generated summary of old conversation.
-        # Future feature: every 100 messages, summarize and store here.
-        # The summary is fed into the AI prompt for long-term memory.
+        # Resets message_count to 0 so the next cycle starts fresh
+        # and only the latest SUMMARY_INTERVAL messages are fetched.
         await self.conn.execute(
             """
             INSERT INTO sessions (channel_id, summary, message_count)
             VALUES (?, ?, 0)
             ON CONFLICT(channel_id) DO UPDATE SET
                 summary = ?,
+                message_count = 0,
                 last_updated = CURRENT_TIMESTAMP
         """,
             (channel_id, summary, summary),

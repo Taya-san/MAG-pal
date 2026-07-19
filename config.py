@@ -43,6 +43,8 @@ class Config:
         # Topics you're interested in (helps the AI know what you like)
         self.INTERESTS = os.getenv("INTERESTS", "")
 
+        self.MAG_LANG = os.getenv("MAG_LANG", "")
+
         # How long responses should be: "short", "medium", "long", or "1-2 sentences"
         self.RESPONSE_LENGTH = os.getenv("RESPONSE_LENGTH", "short")
 
@@ -66,9 +68,12 @@ class Config:
         # Shows every prompt, AI response, latency, etc.
         self.DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 
-        # Optional: summarize old messages to save context
-        # (not yet fully implemented — placeholder for future)
+        # Summarize old conversations for long-term memory.
+        # Every SUMMARY_INTERVAL messages, the AI generates a summary
+        # of what was discussed and stores it in the session.
+        # The summary is included in future prompts for context.
         self.SUMMARIZE = os.getenv("SUMMARIZE", "false").lower() == "true"
+        self.SUMMARY_INTERVAL = int(os.getenv("SUMMARY_INTERVAL", "100"))
 
         # Where to store the SQLite database file
         self.DB_PATH = os.getenv("DB_PATH", "palbot.db")

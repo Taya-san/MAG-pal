@@ -76,6 +76,10 @@ class PalBot(discord.Client):
         # If the bot is in many channels, old channel data gets evicted.
         self._MAX_CHANNEL_DATA = 200
 
+        # Per-channel locks for summarization to prevent
+        # two summarization tasks running for the same channel.
+        self._summary_locks = {}
+
         # === STATISTICS ===
         # Tracks everything for !stats display and debugging.
         # start_time is used to calculate uptime.
@@ -167,9 +171,6 @@ class PalBot(discord.Client):
         keywords = extract_keywords(content)
         for kw in keywords:
             await self.db.upsert_keyword(kw)
-
-        # 3. Track message count for this channel
-        await self.db.increment_message_count(str(message.channel.id))
 
         # 4. Debug logging
         if self.debug_mode:
@@ -265,21 +266,22 @@ class PalBot(discord.Client):
         #   5. Call OpenRouter (openrouter.call)
         #   6. Parse and handle response
 
+        self._cleanup_channel_data()
+
+        # Safety check: if bot isn't fully ready, skip
+        if self.user is None:
+            logger.warning("Bot not ready yet, skipping AI processing")
+            return
+
+        # Track if we should summarise: only mark after non-SKIP messages
+        should_summarise = False
+
+        # === AI PROCESSING (errors caught separately) ===
         try:
-            self._cleanup_channel_data()
-
-            # Safety check: if bot isn't fully ready, skip
-            if self.user is None:
-                logger.warning("Bot not ready yet, skipping AI processing")
-                return
-
             # Acquire semaphore — limits concurrent AI calls to 10
-            # Without this, rapidly sending messages could fire 50+
-            # simultaneous API calls and hit rate limits.
             async with self._ai_semaphore:
 
                 # === STEP 1: HEURISTIC EVALUATION ===
-                # Determines if we should respond, skip, or ask AI.
                 result = await self.responder.evaluate(
                     message, self.user, self.last_response_times
                 )
@@ -291,9 +293,14 @@ class PalBot(discord.Client):
                         logger.info("[DEBUG] Heuristic: SKIP")
                     return
 
+                # Track message count for summarisation trigger.
+                # Only non-SKIP messages count toward the summary interval.
+                await self.db.increment_message_count(
+                    str(message.channel.id)
+                )
+                should_summarise = True
+
                 # Determine if <SILENT> instruction should be included
-                # RESPOND path → no <SILENT> (heuristic says yes)
-                # ASK_AI path → include <SILENT> (let AI decide)
                 should_include_silent = result == HeuristicResult.ASK_AI
                 if result == HeuristicResult.RESPOND:
                     self.stats["heuristic_respond"] += 1
@@ -314,12 +321,6 @@ class PalBot(discord.Client):
                         )
 
                 # === STEP 3: CALL OPENROUTER ===
-                # Use typing indicator so you see "MAG is typing..."
-                # while the AI is generating. Without this, the bot
-                # appears frozen for 1-5 seconds.
-                #
-                # asyncio.to_thread runs the synchronous OpenRouter
-                # call in a thread pool so it doesn't block the event loop.
                 async with message.channel.typing():
                     response_text, usage = await asyncio.to_thread(
                         self.openrouter.call, prompt
@@ -332,7 +333,6 @@ class PalBot(discord.Client):
                         usage["prompt_tokens"] + usage["completion_tokens"]
                     )
 
-                # Debug: log the raw API response
                 if self.debug_mode:
                     logger.info(f"[DEBUG] Raw response: {response_text[:500]}")
                     logger.info(
@@ -348,19 +348,16 @@ class PalBot(discord.Client):
                     response_text
                 )
 
-                # If the AI chose <SILENT>, log the full output in debug
                 if self.debug_mode and not should_respond and response_text.strip():
                     logger.info(
                         f"[DEBUG] SILENT triggered. Full model output: {response_text!r}"
                     )
 
                 if should_respond:
-                    # Record this as the last response time for continuation detection
                     self.last_response_times[message.channel.id] = (
                         datetime.now(timezone.utc)
                     )
 
-                    # Store response info for !bad command
                     self.last_response_info[message.channel.id] = {
                         "user_message": message.content,
                         "bot_response": clean_text,
@@ -368,14 +365,10 @@ class PalBot(discord.Client):
                         "timestamp": time.time(),
                     }
 
-                    # Send the response to Discord
                     await message.channel.send(clean_text)
 
-                    # ALSO store the bot's own message in the database
-                    # This is important for the AI to see what it said
-                    # when building context for future messages.
                     await self.db.store_message(
-                        str(message.id),
+                        f"{message.id}-resp",
                         str(message.channel.id),
                         "bot",
                         clean_text,
@@ -389,11 +382,83 @@ class PalBot(discord.Client):
                         logger.info("[DEBUG] Decision: <SILENT>")
 
         except Exception as e:
-            # Catch ALL errors from the AI pipeline so a single
-            # failed API call doesn't crash the bot.
-            # exc_info=True includes the full traceback in logs.
+            logger.error(f"AI processing failed: {e}", exc_info=True)
+
+        # === SUMMARISATION CHECK (runs even if AI failed) ===
+        # The message count was already incremented above, so we
+        # should still check even if the AI call errored out.
+        if should_summarise and self.config.SUMMARIZE:
+            await self._check_summarization(str(message.channel.id))
+
+    async def _check_summarization(self, channel_id: str):
+        # Checks if it's time to summarize this channel's conversation.
+        # Triggered every SUMMARY_INTERVAL non-SKIP messages.
+        # Uses a per-channel lock so only one summarization per channel
+        # can run at a time.
+        #
+        # Fetches the last SUMMARY_INTERVAL messages, asks the AI to
+        # summarize, and stores the result in sessions.summary.
+        # Runs outside the semaphore so it doesn't block AI calls.
+        try:
+            # Get or create a per-channel lock
+            if channel_id not in self._summary_locks:
+                self._summary_locks[channel_id] = asyncio.Lock()
+
+            # Lock ensures only one summarization task per channel
+            async with self._summary_locks[channel_id]:
+                session = await self.db.get_or_create_session(channel_id)
+                count = session["message_count"]
+
+                # Re-check inside the lock — another task might have
+                # already summarized at this boundary.
+                if count <= 0 or count % self.config.SUMMARY_INTERVAL != 0:
+                    return
+
+                logger.info(
+                    f"Summarizing channel {channel_id} at {count} messages"
+                )
+
+                # Only fetch the messages since the last summary
+                # (which is exactly SUMMARY_INTERVAL messages)
+                messages = await self.db.get_recent_messages(
+                    channel_id, self.config.SUMMARY_INTERVAL
+                )
+
+                if not messages:
+                    return
+
+                prompt = self.responder.build_summary_prompt(messages)
+
+                summary_text, _ = await asyncio.to_thread(
+                    self.openrouter.call, prompt
+                )
+
+                summary_text = summary_text.strip()
+
+                # Guard against empty or non-substantive summaries
+                if not summary_text or len(summary_text) < 10:
+                    logger.warning(
+                        f"Empty or too-short summary for {channel_id}, "
+                        f"keeping previous"
+                    )
+                    return
+
+                if self.debug_mode:
+                    logger.info(
+                        f"[DEBUG] Summary generated for {channel_id}: "
+                        f"{summary_text[:200]}"
+                    )
+
+                await self.db.update_session_summary(
+                    channel_id, summary_text
+                )
+
+                logger.info(f"Summary saved for channel {channel_id}")
+
+        except Exception as e:
             logger.error(
-                f"AI processing failed: {e}", exc_info=True
+                f"Summarization failed for {channel_id}: {e}",
+                exc_info=True,
             )
 
     # ---- COMMAND HANDLERS ----
