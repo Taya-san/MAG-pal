@@ -346,7 +346,8 @@ class BlockParser:
             if re.match(r'^\s*(?:\d+[\.\)]|[-*])\s', stripped):
                 if current_block_id is None:
                     # Create a parent block for orphan list items
-                    block_id = self.store.add_block('', 'list', None)
+                    # Store first item text so top_words are meaningful
+                    block_id = self.store.add_block(stripped, 'list', None)
                     current_block_id = block_id
                     all_block_ids.append(block_id)
                     if current_block_id:
@@ -358,6 +359,14 @@ class BlockParser:
                     score=0.0, label='unlabeled'
                 )
                 all_sentence_ids.append(sid)
+                # Update block text to include this list item (preserves top_words)
+                cur = self.store.conn.cursor()
+                cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
+                existing = cur.fetchone()[0]
+                new_text = existing + ' ' + stripped if existing else stripped
+                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
+                    (new_text, json.dumps(self.store.extract_top_words(new_text)), current_block_id))
+                self.store.conn.commit()
                 i += 1
                 continue
             
