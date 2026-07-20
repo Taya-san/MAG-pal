@@ -139,33 +139,46 @@ class MemoryStore:
 
     def _extract_table_top_words(self, text, max_words=5):
         # Tables don't have repeated words, so frequency doesn't work.
-        # Instead: extract column headers (first row) and first-column values.
-        # These tell us WHAT the table is about.
+        # Extract column headers + non-generic first-column values.
+        # Skip: numbers, generic labels (positive, negative, yes, no, high, low).
+        # Keep: named entities (LU, SVD, SGD), property names (learning rate).
         rows = text.strip().split('\n')
         candidates = []
         
+        # Generic table labels that don't describe content
+        generic_labels = {'positive', 'negative', 'neutral', 'high', 'low', 'medium',
+                          'yes', 'no', 'true', 'false', 'good', 'bad', 'best', 'worst',
+                          'fast', 'slow', 'small', 'large', 'big', 'short', 'long',
+                          'type', 'value', 'name', 'desc', 'description'}
+        
         for i, row in enumerate(rows):
-            # Split by | and strip each cell
             cells = [c.strip().lower() for c in row.split('|') if c.strip()]
             if not cells:
                 continue
-            # First row = column headers (most important)
+            # First row = column headers (most important, always include)
             if i == 0:
                 candidates.extend(cells)
             # First column values = entities being compared
             if cells:
-                candidates.append(cells[0])
-            # Table separator row (|---|---|) — skip
-            if all(c == '---' for c in cells):
+                val = cells[0]
+                # Skip separator rows (|---|)
+                if val.replace('-', '').strip() == '':
+                    pass
+                # Skip numeric values (1, 2, 3 or O(n^3) etc.)
+                elif re.match(r'^[\d()\^ons\s]+$', val):
+                    pass  # skip
+                # Skip generic labels
+                elif val.strip() not in generic_labels:
+                    candidates.append(val)
+            # Skip separator rows (|---|---|) — any number of dashes
+            if all(c.strip().replace('-', '') == '' for c in cells):
                 continue
         
-        # Clean and filter stopwords
         all_words = []
         for c in candidates:
             words = re.sub(r'[^a-z\s]', ' ', c).split()
             all_words.extend([w for w in words if w not in STOPS and len(w) > 2])
         
-        # Deduplicate while preserving order
         seen = set()
         result = []
         for w in all_words:
