@@ -355,6 +355,19 @@ class BlockParser:
                 current_block_id = None
                 continue
             
+            # --- Paragraph (may end with ':' to introduce children) ---
+            # Checked BEFORE equation. A line like "Definition: A = A^T."
+            # ends with ':' and must be a paragraph, not an equation.
+            if stripped.endswith(':') and not stripped.startswith('#'):
+                clean = stripped.rstrip(':').strip()
+                block_id = self.store.add_block(clean, 'paragraph', current_block_id)
+                all_block_ids.append(block_id)
+                sid = self.store.add_sentence(clean, block_id, 0, 'sentence')
+                all_sentence_ids.append(sid)
+                current_block_id = block_id
+                i += 1
+                continue
+            
             # --- Equation (has =, not ending with .) ---
             if '=' in stripped and not stripped.endswith('.'):
                 block_id = self.store.add_block(stripped, 'equation', current_block_id)
@@ -365,8 +378,6 @@ class BlockParser:
                     self.store.add_relation(current_block_id, block_id)
                 i += 1
                 continue
-            
-            # --- Paragraph (may end with ':' to introduce children) ---
             if stripped.endswith(':') and not stripped.startswith('#'):
                 clean = stripped.rstrip(':').strip()
                 block_id = self.store.add_block(clean, 'paragraph', current_block_id)
