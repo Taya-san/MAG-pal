@@ -127,17 +127,19 @@ class MemoryStore:
         return cur.lastrowid
 
     def add_sentence(self, text, block_id, line_number=0, sent_type='sentence',
-                     embedding=None, score=0.0, label='unlabeled'):
+                     embedding=None, score=0.0, label='unlabeled', strip=True):
         """Insert a single sentence or line into the sentences table.
         
         embedding: 384-dim numpy array, stored as binary blob.
         label: category assigned later (e.g. 'definition', 'rule', 'preference')
+        strip: set to False to preserve leading whitespace (for code lines)
         """
+        text_content = text.strip() if strip else text
         emb_blob = embedding.astype(np.float32).tobytes() if embedding is not None else None
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO sentences (text, block_id, line_number, type, embedding, score, label, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (text.strip(), block_id, line_number, sent_type, emb_blob, float(score), label, time.time())
+            (text_content, block_id, line_number, sent_type, emb_blob, float(score), label, time.time())
         )
         self.conn.commit()
         return cur.lastrowid
@@ -227,14 +229,6 @@ class MemoryStore:
         with open(lda_path, 'rb') as f:
             self.lda = pickle.load(f)
 
-    def classify(self, text):
-        """Run LDA on a text. Returns (is_flagged: bool, score: float)."""
-        if self.lda is None:
-            raise ValueError("LDA not loaded. Call load_lda() first.")
-        emb = self.embed(text).reshape(1, -1)
-        score = float(self.lda.decision_function(emb)[0])
-        return score > 0, score
-
     def count_stats(self):
         """Return counts of stored data."""
         cur = self.conn.cursor()
@@ -307,7 +301,7 @@ class BlockParser:
                 for ln, code_line in enumerate(code_lines):
                     sid = self.store.add_sentence(
                         code_line, block_id, ln, 'code_line',
-                        score=0.0, label='unlabeled'
+                        score=0.0, label='unlabeled', strip=False
                     )
                     all_sentence_ids.append(sid)
                 
@@ -326,8 +320,9 @@ class BlockParser:
                     if current_block_id:
                         pass  # already set
                 
+                line_num = len(self.store.get_sentences_by_block(current_block_id))
                 sid = self.store.add_sentence(
-                    stripped, current_block_id, 0, 'list_item',
+                    stripped, current_block_id, line_num, 'list_item',
                     score=0.0, label='unlabeled'
                 )
                 all_sentence_ids.append(sid)
@@ -355,43 +350,10 @@ class BlockParser:
                 current_block_id = None
                 continue
             
-            # --- Paragraph (may end with ':' to introduce children) ---
-            # Checked BEFORE equation. A line like "Definition: A = A^T."
-            # ends with ':' and must be a paragraph, not an equation.
-            if stripped.endswith(':') and not stripped.startswith('#'):
-                clean = stripped.rstrip(':').strip()
-                block_id = self.store.add_block(clean, 'paragraph', current_block_id)
-                all_block_ids.append(block_id)
-                sid = self.store.add_sentence(clean, block_id, 0, 'sentence')
-                all_sentence_ids.append(sid)
-                current_block_id = block_id
-                i += 1
-                continue
-            
-            # --- Equation (has =, not ending with .) ---
-            if '=' in stripped and not stripped.endswith('.'):
-                block_id = self.store.add_block(stripped, 'equation', current_block_id)
-                all_block_ids.append(block_id)
-                sid = self.store.add_sentence(stripped, block_id, 0, 'equation')
-                all_sentence_ids.append(sid)
-                if current_block_id:
-                    self.store.add_relation(current_block_id, block_id)
-                i += 1
-                continue
-            if stripped.endswith(':') and not stripped.startswith('#'):
-                clean = stripped.rstrip(':').strip()
-                block_id = self.store.add_block(clean, 'paragraph', current_block_id)
-                all_block_ids.append(block_id)
-                sid = self.store.add_sentence(clean, block_id, 0, 'sentence')
-                all_sentence_ids.append(sid)
-                current_block_id = block_id
-                i += 1
-                continue
-            
             # --- Regular sentence (continuation or new paragraph) ---
             if current_block_id is not None and not stripped.endswith(':'):
                 # Continuation: add each sentence individually to current block
-                for ln, s in enumerate(re.split(r'(?<=[.!?])\s+', stripped)):
+                for ln, s in enumerate(re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped)):
                     s = s.strip()
                     if not s:
                         continue
@@ -408,7 +370,7 @@ class BlockParser:
                 self.store.conn.commit()
             else:
                 # New paragraph: split into individual sentences
-                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', stripped) if len(s.strip()) > 3]
+                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped) if len(s.strip()) > 3]
                 block_text = ' '.join(sents)
                 block_id = self.store.add_block(block_text, 'paragraph', None)
                 all_block_ids.append(block_id)
