@@ -14,7 +14,7 @@ Schema:
 Each sentence gets its own embedding and LDA score.
 Blocks group related sentences and form parent-child hierarchies.
 """
-import sqlite3, json, re, time, numpy as np
+import sqlite3, json, re, time, numpy as np, pickle
 from collections import Counter
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 
@@ -50,12 +50,15 @@ STOPS = set([
 class MemoryStore:
     """SQLite-backed store for sentences, blocks, and their relationships."""
 
-    def __init__(self, db_path=DB_PATH):
+    def __init__(self, db_path=DB_PATH, lda_path=None):
         self.db_path = db_path
         self.conn = sqlite3.connect(db_path)
         self.conn.row_factory = sqlite3.Row
         self._create_tables()
         self.analyzer = SentimentIntensityAnalyzer()
+        self.lda = None
+        if lda_path:
+            self.load_lda(lda_path)
 
     def _create_tables(self):
         """Create the schema if it doesn't exist."""
@@ -219,6 +222,19 @@ class MemoryStore:
             result.append(node)
         return result
 
+    def load_lda(self, lda_path):
+        """Load a pre-trained LDA model from file."""
+        with open(lda_path, 'rb') as f:
+            self.lda = pickle.load(f)
+
+    def classify(self, text):
+        """Run LDA on a text. Returns (is_flagged: bool, score: float)."""
+        if self.lda is None:
+            raise ValueError("LDA not loaded. Call load_lda() first.")
+        emb = self.embed(text).reshape(1, -1)
+        score = float(self.lda.decision_function(emb)[0])
+        return score > 0, score
+
     def count_stats(self):
         """Return counts of stored data."""
         cur = self.conn.cursor()
@@ -248,10 +264,9 @@ class BlockParser:
     Detection order: code → list → table → equation → paragraph
     """
 
-    def __init__(self, memory_store, embed_fn=None, lda=None):
+    def __init__(self, memory_store, embed_fn=None):
         self.store = memory_store
         self.embed = embed_fn
-        self.lda = lda
 
     def parse_and_store(self, text):
         """Parse text and store everything into the database.
@@ -394,7 +409,7 @@ class BlockParser:
             i += 1
         
         # Now classify each sentence with LDA if available
-        if self.embed and self.lda:
+        if self.embed and self.store.lda:
             self._classify_sentences(all_sentence_ids)
         
         return all_block_ids, all_sentence_ids
@@ -412,7 +427,7 @@ class BlockParser:
             if not row or len(row[0].strip()) < 10:
                 continue
             emb = self.embed(row[0]).reshape(1, -1)
-            score = float(self.lda.decision_function(emb)[0])
+            score = float(self.store.lda.decision_function(emb)[0])
             label = 'flagged' if score > 0 else 'unlabeled'
             cur.execute(
                 "UPDATE sentences SET score = ?, label = ? WHERE id = ?",
