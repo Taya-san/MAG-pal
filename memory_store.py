@@ -1,4 +1,46 @@
-"""  
+# memory_store.py
+# MEMORY ENGINE — SQLite-backed hierarchical memory with LDA classification.
+#
+# This module stores AI responses as a tree of blocks + sentences.
+# It works with multilingual-e5-small embeddings and a pre-trained LDA
+# to automatically flag definitional sentences worth remembering.
+#
+# Why block + sentence?
+#   AI responses have structure: a paragraph introduces a concept (block),
+#   followed by list items, code blocks, or tables (child blocks).
+#   Each individual line/sentence gets its own embedding for fine-grained
+#   retrieval, but blocks group them for context.
+#
+# Schema:
+#   sentences: one row per sentence or line
+#     Stores: text, embedding (384-dim float32 blob), LDA score, label
+#     Label: 'flagged' (worth storing) or 'unlabeled' (skip)
+#   blocks: groups of related sentences
+#     Types: paragraph, list, code, table, equation
+#     parent_id: links child blocks to their parent
+#   block_relations: parent-child links
+#
+# Pipeline:
+#   AI response text
+#     -> BlockParser.parse_and_store()
+#     -> Split into blocks (code/list/table/paragraph/equation)
+#     -> Split each block into individual sentences
+#     -> Embed each sentence with multilingual-e5-small
+#     -> Classify with LDA (pre-trained on 142 examples)
+#     -> Code/equations/table rows inherit from parent block
+#
+# Detection order (first match wins):
+#   1. Code blocks (``` fences)
+#   2. List items (numbered or bulleted)
+#   3. Tables (pipe-delimited | rows)
+#   4. Paragraph parents (lines ending with ':')
+#   5. Equations (contain '=' but not ends with '.')
+#   6. Regular sentences (everything else)
+#
+# Cross-lingual: LDA trained on English but transfers to Indonesian
+# because multilingual-e5-small maps both languages into the same
+# embedding space. Indonesian stopwords included.
+"""
 Memory Store — SQLite-backed hierarchical memory for the MAG-pal bot.
 
 Schema:
@@ -14,6 +56,7 @@ Schema:
 Each sentence gets its own embedding and LDA score.
 Blocks group related sentences and form parent-child hierarchies.
 """
+
 import sqlite3, json, re, time, numpy as np, pickle
 from collections import Counter
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
@@ -39,7 +82,9 @@ class MemoryStore:
             self.load_lda(lda_path)
 
     def _create_tables(self):
-        """Create the schema if it doesn't exist."""
+        # Create the schema if it doesn't exist.
+        # Uses IF NOT EXISTS so it's safe to call every startup.
+        # SQLite auto-creates the file if it doesn't exist.
         cur = self.conn.cursor()
         cur.executescript("""
             CREATE TABLE IF NOT EXISTS blocks (
@@ -79,7 +124,8 @@ class MemoryStore:
         self.conn.commit()
 
     def extract_top_words(self, text, max_words=5):
-        """Extract top words from text, excluding stopwords."""
+        # Extract top words from text, excluding stopwords.
+        # Used for keyword-based retrieval. Max 5 words per block.
         cleaned = re.sub(r'[^a-z\s]', ' ', text.lower())
         words = [w for w in cleaned.split() if w not in STOPS and len(w) > 2]
         if not words:
@@ -89,11 +135,9 @@ class MemoryStore:
     # ===== INSERT =====
 
     def add_block(self, text, block_type='paragraph', parent_id=None):
-        """Insert a block and return its ID.
-        
-        A block is a group of related lines: a paragraph, code block,
-        list group, table, or equation.
-        """
+        # Insert a block and return its ID.
+        # A block is a group of related lines: paragraph, code, list, table, equation.
+        # parent_id links this block as a child of another block.
         top_words = json.dumps(self.extract_top_words(text))
         sentiment = self.analyzer.polarity_scores(text)['compound']
         cur = self.conn.cursor()
@@ -106,12 +150,10 @@ class MemoryStore:
 
     def add_sentence(self, text, block_id, line_number=0, sent_type='sentence',
                      embedding=None, score=0.0, label='unlabeled', strip=True):
-        """Insert a single sentence or line into the sentences table.
-        
-        embedding: 384-dim numpy array, stored as binary blob.
-        label: category assigned later (e.g. 'definition', 'rule', 'preference')
-        strip: set to False to preserve leading whitespace (for code lines)
-        """
+        # Insert a single sentence or line into the sentences table.
+        # Each sentence gets its own embedding (384-dim float32 blob).
+        # strip=False preserves indentation for code lines.
+        # label is set later by LDA classification.
         text_content = text.strip() if strip else text
         emb_blob = embedding.astype(np.float32).tobytes() if embedding is not None else None
         cur = self.conn.cursor()
@@ -123,7 +165,8 @@ class MemoryStore:
         return cur.lastrowid
 
     def add_relation(self, parent_id, child_id, relation_type='child_of'):
-        """Link two blocks as parent-child."""
+        # Link two blocks as parent-child.
+        # relation_type = 'child_of' is the default.
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO block_relations (parent_id, child_id, relation_type) VALUES (?, ?, ?)",
@@ -227,16 +270,27 @@ class MemoryStore:
 # ===== BLOCK PARSER (integrated with MemoryStore) =====
 
 class BlockParser:
-    """Parses AI response text and stores directly into MemoryStore.
-    
-    Each paragraph/block becomes a 'block' row.
-    Each sentence/line becomes a 'sentence' row linked to its block.
-    Parent-child relationships use block_relations.
-    
-    Detection order: code → list → table → equation → paragraph
-    """
+    # Parses AI response text and stores directly into MemoryStore.
+    #
+    # Detection order (first match wins):
+    #   1. Code blocks (``` ... ```) — multi-line, becomes a child block
+    #   2. List items (1., -, *) — each item is a sentence in a list block
+    #   3. Tables (| ... |) — multi-line, becomes a child block
+    #   4. Paragraph parents (lines ending with ':') — introduces children
+    #   5. Equations (contain '=') — single line, becomes a child block
+    #   6. Regular sentences — flat paragraphs or continuation text
+    #
+    # After parsing, each sentence is classified by LDA.
+    # Code lines, equations, and table rows SKIP LDA and inherit
+    # their label from the parent block's first natural-language sentence.
+    #
+    # This is because the embedding model doesn't understand
+    # programming syntax or mathematical notation — it would get
+    # meaningless scores.
 
     def __init__(self, memory_store, embed_fn=None):
+        # store: MemoryStore instance where data will be inserted.
+        # embed_fn: function(text) -> 384-dim numpy array.
         self.store = memory_store
         self.embed = embed_fn
 
