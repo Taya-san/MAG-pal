@@ -123,14 +123,57 @@ class MemoryStore:
         """)
         self.conn.commit()
 
-    def extract_top_words(self, text, max_words=5):
+    def extract_top_words(self, text, max_words=5, content_type='paragraph'):
         # Extract top words from text, excluding stopwords.
-        # Used for keyword-based retrieval. Max 5 words per block.
+        # For tables: prioritizes column headers and first-column values
+        # because table content rarely has repeated words (frequency fails).
+        # For everything else: standard frequency-based extraction.
+        if content_type == 'table':
+            return self._extract_table_top_words(text, max_words)
+        
         cleaned = re.sub(r'[^a-z\s]', ' ', text.lower())
         words = [w for w in cleaned.split() if w not in STOPS and len(w) > 2]
         if not words:
             return []
         return [w for w, _ in Counter(words).most_common(max_words)]
+
+    def _extract_table_top_words(self, text, max_words=5):
+        # Tables don't have repeated words, so frequency doesn't work.
+        # Instead: extract column headers (first row) and first-column values.
+        # These tell us WHAT the table is about.
+        rows = text.strip().split('\n')
+        candidates = []
+        
+        for i, row in enumerate(rows):
+            # Split by | and strip each cell
+            cells = [c.strip().lower() for c in row.split('|') if c.strip()]
+            if not cells:
+                continue
+            # First row = column headers (most important)
+            if i == 0:
+                candidates.extend(cells)
+            # First column values = entities being compared
+            if cells:
+                candidates.append(cells[0])
+            # Table separator row (|---|---|) — skip
+            if all(c == '---' for c in cells):
+                continue
+        
+        # Clean and filter stopwords
+        all_words = []
+        for c in candidates:
+            words = re.sub(r'[^a-z\s]', ' ', c).split()
+            all_words.extend([w for w in words if w not in STOPS and len(w) > 2])
+        
+        # Deduplicate while preserving order
+        seen = set()
+        result = []
+        for w in all_words:
+            if w not in seen:
+                seen.add(w)
+                result.append(w)
+        
+        return result[:max_words]
 
     # ===== INSERT =====
 
@@ -138,7 +181,7 @@ class MemoryStore:
         # Insert a block and return its ID.
         # A block is a group of related lines: paragraph, code, list, table, equation.
         # parent_id links this block as a child of another block.
-        top_words = json.dumps(self.extract_top_words(text))
+        top_words = json.dumps(self.extract_top_words(text, content_type=block_type))
         sentiment = self.analyzer.polarity_scores(text)['compound']
         cur = self.conn.cursor()
         cur.execute(
