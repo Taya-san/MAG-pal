@@ -1,9 +1,9 @@
-"""
+"""  
 Memory Store — SQLite-backed hierarchical memory for the MAG-pal bot.
 
 Schema:
   sentences: one row per sentence or line of text
-    id | text | block_id | type | embedding | score | is_definition | created_at
+    id | text | block_id | type | embedding | score | label | created_at
 
   blocks: groups of sentences forming a logical unit
     id | text | type | parent_id | top_words | sentiment | created_at
@@ -79,7 +79,7 @@ class MemoryStore:
                 type TEXT NOT NULL DEFAULT 'sentence',
                 embedding BLOB,
                 score REAL DEFAULT 0.0,
-                is_definition INTEGER DEFAULT 0,
+                label TEXT DEFAULT 'unlabeled',
                 created_at REAL NOT NULL
             );
 
@@ -124,16 +124,17 @@ class MemoryStore:
         return cur.lastrowid
 
     def add_sentence(self, text, block_id, line_number=0, sent_type='sentence',
-                     embedding=None, score=0.0, is_definition=False):
+                     embedding=None, score=0.0, label='unlabeled'):
         """Insert a single sentence or line into the sentences table.
         
         embedding: 384-dim numpy array, stored as binary blob.
+        label: category assigned later (e.g. 'definition', 'rule', 'preference')
         """
         emb_blob = embedding.astype(np.float32).tobytes() if embedding is not None else None
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO sentences (text, block_id, line_number, type, embedding, score, is_definition, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-            (text.strip(), block_id, line_number, sent_type, emb_blob, float(score), int(is_definition), time.time())
+            "INSERT INTO sentences (text, block_id, line_number, type, embedding, score, label, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (text.strip(), block_id, line_number, sent_type, emb_blob, float(score), label, time.time())
         )
         self.conn.commit()
         return cur.lastrowid
@@ -176,30 +177,30 @@ class MemoryStore:
         )
         return cur.fetchall()
 
-    def get_definitions(self, limit=50):
-        """Get the most recent definition sentences."""
+    def get_labeled(self, label='flagged', limit=50):
+        """Get the most recent sentences with a given label."""
         cur = self.conn.cursor()
         cur.execute("""
             SELECT s.*, b.type as block_type, b.top_words
             FROM sentences s
             JOIN blocks b ON s.block_id = b.id
-            WHERE s.is_definition = 1
+            WHERE s.label = ?
             ORDER BY s.created_at DESC
             LIMIT ?
-        """, (limit,))
+        """, (label, limit))
         return cur.fetchall()
 
-    def search_by_keyword(self, keyword, limit=20):
-        """Find definition sentences containing a keyword."""
+    def search_by_keyword(self, keyword, label='flagged', limit=20):
+        """Find labeled sentences containing a keyword."""
         cur = self.conn.cursor()
         cur.execute("""
             SELECT s.*, b.type as block_type
             FROM sentences s
             JOIN blocks b ON s.block_id = b.id
-            WHERE s.is_definition = 1 AND s.text LIKE ?
+            WHERE s.label = ? AND s.text LIKE ?
             ORDER BY s.score DESC
             LIMIT ?
-        """, (f'%{keyword}%', limit))
+        """, (label, f'%{keyword}%', limit))
         return cur.fetchall()
 
     def get_tree(self, block_id=None):
@@ -225,11 +226,11 @@ class MemoryStore:
         s = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM blocks")
         b = cur.fetchone()[0]
-        cur.execute("SELECT COUNT(*) FROM sentences WHERE is_definition = 1")
-        d = cur.fetchone()[0]
+        cur.execute("SELECT COUNT(*) FROM sentences WHERE label != 'unlabeled'")
+        fl = cur.fetchone()[0]
         cur.execute("SELECT COUNT(*) FROM block_relations")
         r = cur.fetchone()[0]
-        return {'sentences': s, 'blocks': b, 'definitions': d, 'relations': r}
+        return {'sentences': s, 'blocks': b, 'flagged': fl, 'relations': r}
 
     def close(self):
         self.conn.close()
@@ -291,7 +292,7 @@ class BlockParser:
                 for ln, code_line in enumerate(code_lines):
                     sid = self.store.add_sentence(
                         code_line, block_id, ln, 'code_line',
-                        score=0.0, is_definition=False
+                        score=0.0, label='unlabeled'
                     )
                     all_sentence_ids.append(sid)
                 
@@ -312,7 +313,7 @@ class BlockParser:
                 
                 sid = self.store.add_sentence(
                     stripped, current_block_id, 0, 'list_item',
-                    score=0.0, is_definition=False
+                    score=0.0, label='unlabeled'
                 )
                 all_sentence_ids.append(sid)
                 i += 1
@@ -363,10 +364,14 @@ class BlockParser:
             
             # --- Regular sentence (continuation or new paragraph) ---
             if current_block_id is not None and not stripped.endswith(':'):
-                # Continuation: add as additional sentence to current block
-                sid = self.store.add_sentence(stripped, current_block_id, 0, 'sentence')
-                all_sentence_ids.append(sid)
-                # Update block text
+                # Continuation: add each sentence individually to current block
+                for ln, s in enumerate(re.split(r'(?<=[.!?])\s+', stripped)):
+                    s = s.strip()
+                    if not s:
+                        continue
+                    sid = self.store.add_sentence(s, current_block_id, ln, 'sentence')
+                    all_sentence_ids.append(sid)
+                # Update block text (full merged paragraph)
                 cur = self.store.conn.cursor()
                 cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
                 existing = cur.fetchone()[0]
@@ -376,11 +381,14 @@ class BlockParser:
                      self.store.analyzer.polarity_scores(new_text)['compound'], current_block_id))
                 self.store.conn.commit()
             else:
-                # New paragraph
-                block_id = self.store.add_block(stripped, 'paragraph', None)
+                # New paragraph: split into individual sentences
+                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+', stripped) if len(s.strip()) > 3]
+                block_text = ' '.join(sents)
+                block_id = self.store.add_block(block_text, 'paragraph', None)
                 all_block_ids.append(block_id)
-                sid = self.store.add_sentence(stripped, block_id, 0, 'sentence')
-                all_sentence_ids.append(sid)
+                for ln, s in enumerate(sents):
+                    sid = self.store.add_sentence(s, block_id, ln, 'sentence')
+                    all_sentence_ids.append(sid)
                 current_block_id = block_id
             
             i += 1
@@ -392,7 +400,11 @@ class BlockParser:
         return all_block_ids, all_sentence_ids
 
     def _classify_sentences(self, sentence_ids):
-        """Run LDA on all stored sentences to mark definitions."""
+        """Run LDA on all stored sentences and set their label.
+        
+        Currently labels as 'flagged' if LDA score > 0.
+        You can change label thresholds later without reprocessing.
+        """
         cur = self.store.conn.cursor()
         for sid in sentence_ids:
             cur.execute("SELECT text FROM sentences WHERE id = ?", (sid,))
@@ -401,10 +413,10 @@ class BlockParser:
                 continue
             emb = self.embed(row[0]).reshape(1, -1)
             score = float(self.lda.decision_function(emb)[0])
-            is_def = 1 if score > 0 else 0
+            label = 'flagged' if score > 0 else 'unlabeled'
             cur.execute(
-                "UPDATE sentences SET score = ?, is_definition = ? WHERE id = ?",
-                (score, is_def, sid)
+                "UPDATE sentences SET score = ?, label = ? WHERE id = ?",
+                (score, label, sid)
             )
         self.store.conn.commit()
 
