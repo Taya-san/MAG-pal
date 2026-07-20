@@ -417,16 +417,42 @@ class BlockParser:
     def _classify_sentences(self, sentence_ids):
         """Run LDA on all stored sentences and set their label.
         
+        Skips: code lines, equations, table rows, code fences — these
+        contain non-natural language that the embedding model can't
+        understand. They inherit their parent block's classification instead.
+        
         Currently labels as 'flagged' if LDA score > 0.
-        You can change label thresholds later without reprocessing.
         """
         cur = self.store.conn.cursor()
         for sid in sentence_ids:
-            cur.execute("SELECT text FROM sentences WHERE id = ?", (sid,))
+            cur.execute("SELECT s.text, s.type, b.id as block_id FROM sentences s JOIN blocks b ON s.block_id = b.id WHERE s.id = ?", (sid,))
             row = cur.fetchone()
-            if not row or len(row[0].strip()) < 10:
+            if not row:
                 continue
-            emb = self.embed(row[0]).reshape(1, -1)
+            text, stype, block_id = row[0], row[1], row[2]
+            
+            # Skip non-natural-language types: code lines, equations, table rows, fences
+            # These contain programming syntax or math symbols that the embedding
+            # model doesn't understand. Inherit classification from parent block.
+            if stype in ('code_line', 'equation', 'table_row'):
+                # Find parent block of this block via block_relations
+                cur.execute("SELECT parent_id FROM block_relations WHERE child_id = ? AND relation_type = 'child_of'", (block_id,))
+                parent_rel = cur.fetchone()
+                if parent_rel:
+                    parent_id = parent_rel[0]
+                    # Get first natural-language sentence from parent
+                    cur.execute("SELECT id, score, label FROM sentences WHERE block_id = ? AND type = 'sentence' ORDER BY line_number LIMIT 1", (parent_id,))
+                    ps = cur.fetchone()
+                    if ps:
+                        cur.execute("UPDATE sentences SET score = ?, label = ? WHERE id = ?", (ps[1], ps[2], sid))
+                        continue
+                # Fallback: mark as unlabeled with score 0
+                cur.execute("UPDATE sentences SET score = 0.0, label = 'unlabeled' WHERE id = ?", (sid,))
+                continue
+            
+            if len(text.strip()) < 10:
+                continue
+            emb = self.embed(text).reshape(1, -1)
             score = float(self.store.lda.decision_function(emb)[0])
             label = 'flagged' if score > 0 else 'unlabeled'
             cur.execute(
