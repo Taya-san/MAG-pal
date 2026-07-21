@@ -3,7 +3,7 @@ from stopwords import STOPWORDS
 import re
 
 
-def extract_top_words(text, max_words=5, content_type='paragraph'):
+def extract_top_words(text, content_type='paragraph', max_words=5):
     if content_type == 'table':
         return _extract_table_top_words(text, max_words)
 
@@ -21,7 +21,12 @@ def _extract_table_top_words(text, max_words=5):
 
     grid = []
     for row in rows:
-        cells = [c.strip().lower() for c in row.split('|') if c.strip()]
+        cells = [c.strip().lower() for c in row.split('|')]
+        # Remove leading/trailing empty cells (from outer ||)
+        if cells and cells[0] == '':
+            cells = cells[1:]
+        if cells and cells[-1] == '':
+            cells = cells[:-1]
         if not cells:
             continue
         if all(c.replace('-', '') == '' for c in cells):
@@ -34,15 +39,27 @@ def _extract_table_top_words(text, max_words=5):
     header, data = grid[0], grid[1:]
 
     def is_numeric(val):
+        # Pure numbers: ints (1), floats (0.95), negatives (-5), scientific (1e-3)
+        # with optional commas (1,000,000), units (100M, 350GB), percent signs (95%)
         try:
-            float(val.replace(',', ''))
-            return True
+            cleaned = val.replace(',', '').replace('%', '').replace(' ', '')
+            # Strip trailing unit letters (B, M, K, GB, MB, KB, Hz, etc.)
+            cleaned = re.sub(r'[a-z%]+$', '', cleaned)
+            if cleaned:
+                float(cleaned)
+                return True
         except ValueError:
             pass
+        # Ordinals: 1st, 2nd, 3rd, 4th, 5th
+        if re.match(r'^\d+(?:st|nd|rd|th)$', val):
+            return True
+        # Pure non-alpha strings: 1.0, -5, ---, |||
         if val and not any(c.isalpha() for c in val):
             return True
-        if any(c in val for c in {'^', '×', '÷', '√', '∫', '∑', 'π'}):
+        # Math symbols
+        if any(c in val for c in {'^', '×', '÷', '√', '∫', '∑', 'π', 'Σ', 'μ'}):
             return True
+        # Equation-like: O(n^3), sin(x), etc.
         if any(c in val for c in {'(', ')'}) and not any(c.isalpha() for c in re.sub(r'[osn]', '', val)):
             return True
         return False
@@ -52,12 +69,15 @@ def _extract_table_top_words(text, max_words=5):
 
     for ci in range(cols):
         vals = [r[ci] for r in data if ci < len(r)]
-        if vals and all(is_numeric(v) for v in vals):
-            continue
+        all_numeric = vals and all(is_numeric(v) for v in vals)
+        # Always keep the header (it describes what the column represents)
         candidates.append(header[ci])
-        for v in vals:
-            if not is_numeric(v):
-                candidates.append(v)
+        # Only keep values if they're not all numeric/equation
+        # (numeric data values like 0.01, 100, O(n^3) aren't useful for retrieval)
+        if vals and not all_numeric:
+            for v in vals:
+                if not is_numeric(v):
+                    candidates.append(v)
 
     all_words = []
     for c in candidates:
