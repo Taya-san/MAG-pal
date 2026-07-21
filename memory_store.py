@@ -190,12 +190,16 @@ class BlockParser:
         lines = text.split('\n')
         i = 0
         current_block_id = None
+        last_block_type = None
 
         while i < len(lines):
             stripped = lines[i].strip()
 
             if not stripped:
-                current_block_id = None
+                if last_block_type in ('table', 'code', 'list', 'equation'):
+                    current_block_id = None
+                # If last_block_type is 'paragraph' or None, keep current_block_id
+                # so consecutive paragraphs merge into one block
                 i += 1
                 continue
 
@@ -224,6 +228,7 @@ class BlockParser:
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
                 current_block_id = None
+                last_block_type = 'code'
                 continue
 
             # --- List item ---
@@ -269,6 +274,7 @@ class BlockParser:
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
                 current_block_id = None
+                last_block_type = 'table'
                 continue
 
             # --- Regular sentence ---
@@ -288,6 +294,22 @@ class BlockParser:
                     (new_text, json.dumps(extract_top_words(new_text)),
                      self.store.analyzer.polarity_scores(new_text)['compound'], current_block_id))
                 self.store.conn.commit()
+                last_block_type = 'paragraph'
+            elif current_block_id is not None and stripped.endswith(':'):
+                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped) if len(s.strip()) > 3]
+                block_text = ' '.join(sents)
+                cur = self.store.conn.cursor()
+                cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
+                existing = cur.fetchone()[0]
+                new_text = existing + ' ' + block_text
+                cur.execute("UPDATE blocks SET text = ?, top_words = ?, sentiment = ? WHERE id = ?",
+                    (new_text, json.dumps(extract_top_words(new_text)),
+                     self.store.analyzer.polarity_scores(new_text)['compound'], current_block_id))
+                self.store.conn.commit()
+                for ln, s in enumerate(sents):
+                    sid = self.store.add_sentence(s, current_block_id, ln, 'sentence')
+                    all_sentence_ids.append(sid)
+                last_block_type = 'paragraph'
             else:
                 sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped) if len(s.strip()) > 3]
                 block_text = ' '.join(sents)
