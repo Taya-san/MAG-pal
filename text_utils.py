@@ -71,67 +71,20 @@ def _extract_table_top_words(text, max_words=5):
     # Columns where ALL values are from this set are classification labels
     # (Positive/Negative, High/Low, True/False) — useless for retrieval.
     # Entity names (Python, Rust, SGD, Adam, Transformer) are NOT here.
-    # Generic classifier words describing row categories.
-    # Columns where ALL values are from this set are classification labels
-    # (Positive/Negative, True/False, High/Low) — useless for retrieval.
-    # Entity names (Python, Rust, GPU, CNN, Transformer) are NOT here.
-    _CLASSIFIER = {
-        'positive', 'negative', 'neutral',
-        'high', 'medium', 'low', 'mid',
-        'true', 'false',
-        'yes', 'no',  # 'no' is also a stopword — fine here
-        'good', 'bad', 'poor', 'average', 'excellent', 'better', 'worse',
-        'pass', 'fail', 'passed', 'failed',
-        'success', 'failure', 'successful', 'unsuccessful',
-        'active', 'inactive', 'activated', 'deactivated',
-        'enabled', 'disabled',
-        'on', 'off',
-        'detected', 'undetected',
-        'present', 'absent',
-        'valid', 'invalid',
-        'correct', 'incorrect', 'right', 'wrong',
-        'accept', 'reject', 'accepted', 'rejected',
-        'approve', 'deny', 'approved', 'denied',
-        'include', 'exclude', 'included', 'excluded',
-        'required', 'optional',
-        'static', 'dynamic',
-        'local', 'global',
-        'simple', 'complex',
-        'fast', 'slow', 'faster', 'slower',
-        'small', 'large', 'big',
-        'new', 'old',
-        'single', 'multiple',
-        'all', 'none', 'some', 'any', 'every',
-        'other', 'another', 'same', 'different',
-        'known', 'unknown',
-        'normal', 'abnormal', 'anomaly',
-        'safe', 'unsafe', 'danger',
-        'clean', 'dirty',
-        'full', 'empty',
-        'visible', 'hidden',
-        'public', 'private',
-        'read', 'write',
-        'input', 'output',
-        'source', 'target',
-        'easy', 'hard', 'difficult',
-        'cheap', 'expensive',
-        'free', 'paid', 'premium',
-        'basic', 'pro',
-        'stable', 'unstable', 'experimental',
-        'todo', 'fixme', 'hack', 'xxx',
-        'n/a', 'na',
-    }
-
     for ci in range(cols):
         vals = [r[ci] for r in data if ci < len(r)]
         all_numeric = vals and all(is_numeric(v) for v in vals)
         string_vals = [v for v in vals if v and not is_numeric(v)]
         
-        # Classifier detection: a column is a classifier if ALL its string values
-        # are generic classifier words (Positive, True, High, etc.)
-        # Entity names (Python, Rust, SGD, Transformer) are NOT classifier words.
-        all_classifier = bool(string_vals) and all(v in _CLASSIFIER for v in string_vals)
-        is_classifier = len(string_vals) >= 4 and all_classifier
+        # Classifier detection: if a column has many rows but very few unique
+        # string values, it's likely a classification label column (Positive/
+        # Negative, High/Low) — not useful for retrieval.
+        # Threshold: >=10 rows AND unique/rows < 0.3 → classifier
+        # This high bar ensures entity-name columns (Python/Rust with 2 uniq
+        # across 8 rows = 0.25) are NOT caught. Only extreme cases like
+        # 20 rows of True/False (2/20 = 0.1) get filtered.
+        uniq = len(set(string_vals))
+        is_classifier = len(string_vals) >= 10 and uniq / max(len(string_vals), 1) < 0.3
         
         if not is_classifier:
             candidates.append(header[ci])
