@@ -84,7 +84,7 @@ def _extract_table_top_words(text, max_words=5):
         # across 8 rows = 0.25) are NOT caught. Only extreme cases like
         # 20 rows of True/False (2/20 = 0.1) get filtered.
         uniq = len(set(string_vals))
-        is_classifier = len(string_vals) >= 10 and uniq / max(len(string_vals), 1) < 0.3
+        is_classifier = len(string_vals) >= 20 and uniq / max(len(string_vals), 1) < 0.3
         
         if not is_classifier:
             candidates.append(header[ci])

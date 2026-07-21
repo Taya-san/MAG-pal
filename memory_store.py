@@ -319,6 +319,7 @@ class BlockParser:
                     sid = self.store.add_sentence(s, block_id, ln, 'sentence')
                     all_sentence_ids.append(sid)
                 current_block_id = block_id
+                last_block_type = 'paragraph'
 
             i += 1
 
