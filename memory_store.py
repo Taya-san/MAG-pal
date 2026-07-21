@@ -138,98 +138,67 @@ class MemoryStore:
         return [w for w, _ in Counter(words).most_common(max_words)]
 
     def _extract_table_top_words(self, text, max_words=5):
-        # Tables don't have repeated words, so frequency doesn't work.
-        # Instead: score each column by how many meaningful words it has.
-        # Pick the most meaningful column + headers as the top_words.
-        # This handles tables where the entity column is NOT the first one
-        # (e.g. numbered tables where column 2 has the real names).
+        # Tables don't repeat words, so frequency fails.
+        # Strategy: skip columns where ALL data values are numeric/equation
+        # (row numbers, learning rates, O(n³) complexity, etc.)
+        # Keep headers + values from string-only columns.
         rows = text.strip().split('\n')
         if not rows:
             return []
-        
-        # Parse columns: each column is a list of cell values
-        columns = []  # list of lists
-        headers = []
-        
-        for i, row in enumerate(rows):
+
+        # Parse into 2D grid (skip separator rows like |---|---|---|)
+        grid = []
+        for row in rows:
             cells = [c.strip().lower() for c in row.split('|') if c.strip()]
             if not cells:
                 continue
-            # Skip separator rows (|---|---|)
-            if all(c.replace('-', '').strip() == '' for c in cells):
+            if all(c.replace('-', '') == '' for c in cells):
                 continue
-            if i == 0:
-                headers = cells
-                columns = [[] for _ in cells]
-            for j, cell in enumerate(cells):
-                if j < len(columns):
-                    columns[j].append(cell)
-        
-        if not columns:
+            grid.append(cells)
+
+        if len(grid) < 2:
             return []
-        
-        # Score each column by meaningful word count
-        generic = {'positive', 'negative', 'neutral', 'high', 'low', 'medium',
-                   'yes', 'no', 'true', 'false', 'good', 'bad', 'best', 'worst',
-                   'fast', 'slow', 'small', 'large', 'big', 'short', 'long',
-                   'type', 'value', 'name', 'desc', 'description'}
-        
+
+        header, data = grid[0], grid[1:]
+
         def is_numeric(val):
-            # Handle: ints (1), floats (0.95), scientific (1.5e6),
-            # units (100M, 10K), percentages (95%), math notation (O(n^3))
-            cleaned = val.strip().lower()
-            return bool(re.match(r'^[\d().,\-\^onsemk%$\s]+$', cleaned))
-        
-        def count_meaningful(values):
-            count = 0
-            for v in values:
-                v = v.strip()
-                if is_numeric(v):
-                    continue
-                if v in generic:
-                    continue
-                words = re.sub(r'[^a-z\s]', ' ', v).split()
-                for w in words:
-                    if w not in STOPS and len(w) > 2:
-                        count += 1
-            return count
-        
-        # Find best column (skip headers in scoring)
-        best_col = 0
-        best_score = -1
-        for j in range(len(columns)):
-            if j >= len(headers):
+            try:
+                float(val.replace(',', ''))
+                return True
+            except ValueError:
+                pass
+            if val and not any(c.isalpha() for c in val):
+                return True
+            if any(c in val for c in {'^', '×', '÷', '√', '∫', '∑', 'π'}):
+                return True
+            if any(c in val for c in {'(', ')'}) and not any(c.isalpha() for c in re.sub(r'[osn]', '', val)):
+                return True
+            return False
+
+        cols = min(len(header), max(len(r) for r in data))
+        candidates = []
+
+        for ci in range(cols):
+            vals = [r[ci] for r in data if ci < len(r)]
+            if vals and all(is_numeric(v) for v in vals):
                 continue
-            # Score based on data rows only (skip header row which is at index 0)
-            data_values = columns[j][1:] if len(columns[j]) > 1 else []
-            score = count_meaningful(data_values)
-            if score > best_score:
-                best_score = score
-                best_col = j
-        
-        # Build candidates: headers + best column values
-        candidates = list(headers)
-        for v in columns[best_col][1:]:  # skip header
-            v = v.strip()
-            if is_numeric(v):
-                continue
-            if v in generic:
-                continue
-            candidates.append(v)
-        
-        # Extract words from candidates
+            candidates.append(header[ci])
+            for v in vals:
+                if not is_numeric(v):
+                    candidates.append(v)
+
         all_words = []
         for c in candidates:
             words = re.sub(r'[^a-z\s]', ' ', c).split()
-            all_words.extend([w for w in words if w not in STOPS and len(w) > 2])
-        
+            all_words.extend([w for w in words if w not in STOPS and len(w) >= 2])
+
         seen = set()
         result = []
         for w in all_words:
             if w not in seen:
                 seen.add(w)
                 result.append(w)
-        
+
         return result[:max_words]
 
     # ===== INSERT =====
