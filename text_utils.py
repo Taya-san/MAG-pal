@@ -69,14 +69,21 @@ def _extract_table_top_words(text, max_words=5):
 
     for ci in range(cols):
         vals = [r[ci] for r in data if ci < len(r)]
+        # Skip non-empty values that are all numeric
         all_numeric = vals and all(is_numeric(v) for v in vals)
-        # Always keep the header (it describes what the column represents)
-        candidates.append(header[ci])
-        # Only keep values if they're not all numeric/equation
-        # (numeric data values like 0.01, 100, O(n^3) aren't useful for retrieval)
-        if vals and not all_numeric:
-            for v in vals:
-                if not is_numeric(v):
+        # Skip classifier columns: 2-3 labels (Positive/Negative, High/Low)
+        # across many rows aren't useful for retrieval.
+        # Heuristic: unique_strings / total_rows < 0.5 → likely a classifier
+        string_vals = [v for v in vals if v and not is_numeric(v)]
+        uniq = len(set(string_vals))
+        is_classifier = len(string_vals) >= 4 and uniq / len(string_vals) < 0.5
+        
+        if not is_classifier:
+            # Keep the header — it describes the column's content
+            candidates.append(header[ci])
+            # Keep values only if not all-numeric and not a classifier column
+            if vals and not all_numeric:
+                for v in string_vals:
                     candidates.append(v)
 
     all_words = []
