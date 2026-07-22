@@ -1,111 +1,145 @@
-# config.py
-# Loads all settings from the .env file and validates them.
-# Every config value has a default so the bot won't crash
-# if something is missing from .env — except the 3 required fields.
+"""
+Load and validate bot configuration from environment variables.
+
+Every config value has a sensible default so the bot won't crash
+if something is missing from .env — except the 3 required fields.
+Access values like: config.DISCORD_TOKEN, config.PAL_NAME, etc.
+"""
+
+from __future__ import annotations
 
 import os
-from dotenv import load_dotenv
-
-# Load variables from .env into os.environ
-# This runs once when the module is imported
-load_dotenv()
+from dataclasses import dataclass
 
 
+@dataclass(frozen=True)
 class Config:
-    # Holds all bot configuration in one place
-    # Access values like: config.DISCORD_TOKEN, config.PAL_NAME, etc.
+    """Immutable bot configuration loaded from environment.
 
-    def __init__(self):
-        # === REQUIRED: bot will crash at startup if these are missing ===
+    Use Config.from_env() to create an instance from a .env file.
+    The load_dotenv() call must happen before this (in main.py).
+    All defaults are set here; validate() checks required fields.
+    """
 
-        # Discord bot token from https://discord.com/developers/applications
-        self.DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+    # === REQUIRED ===
+    disc_token: str
+    openrouter_key: str
+    owner_id: int
 
-        # OpenRouter API key from https://openrouter.ai/keys
-        self.OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+    # === PERSONALITY ===
+    pal_name: str
+    user_name: str
+    personality: str
+    interests: str
+    mag_lang: str
+    response_length: str
 
-        # Your Discord user ID (right-click your name → Copy ID)
-        # Only this user's messages will be processed
+    # === AI MODEL ===
+    model: str
+    max_tokens: int
+    temperature: float
+
+    # === BEHAVIOR ===
+    debug: bool
+    summarize: bool
+    summary_interval: int
+    db_path: str
+    heuristic_continuation_minutes: int
+
+    # === MULTI-USER (optional) ===
+    owner_names: dict[int, str]
+    name_to_owner: dict[str, int]
+
+    # === LEGACY ALIASES (for backward compatibility) ===
+    @property
+    def DISCORD_TOKEN(self): return self.disc_token
+    @property
+    def OPENROUTER_API_KEY(self): return self.openrouter_key
+    @property
+    def OWNER_ID(self): return self.owner_id
+    @property
+    def PAL_NAME(self): return self.pal_name
+    @property
+    def USER_NAME(self): return self.user_name
+    @property
+    def PERSONALITY(self): return self.personality
+    @property
+    def INTERESTS(self): return self.interests
+    @property
+    def MAG_LANG(self): return self.mag_lang
+    @property
+    def RESPONSE_LENGTH(self): return self.response_length
+    @property
+    def MODEL(self): return self.model
+    @property
+    def MAX_TOKENS(self): return self.max_tokens
+    @property
+    def TEMPERATURE(self): return self.temperature
+    @property
+    def DEBUG(self): return self.debug
+    @property
+    def SUMMARIZE(self): return self.summarize
+    @property
+    def SUMMARY_INTERVAL(self): return self.summary_interval
+    @property
+    def DB_PATH(self): return self.db_path
+    @property
+    def HEURISTIC_CONTINUATION_MINUTES(self): return self.heuristic_continuation_minutes
+    @property
+    def OWNER_NAMES(self): return self.owner_names
+    @property
+    def NAME_TO_OWNER(self): return self.name_to_owner
+
+    @classmethod
+    def from_env(cls) -> Config:
+        """Build a frozen Config from environment variables.
+
+        Call this AFTER load_dotenv() has been called (typically in main.py).
+        """
         raw_id = os.getenv("OWNER_ID", "0")
-        self.OWNER_ID = int(raw_id) if raw_id.strip() else 0
+        owner_id = int(raw_id) if raw_id.strip() else 0
 
-        # === PERSONALITY: controls how the AI talks ===
-
-        # The bot's name — used in prompts and detection
-        self.PAL_NAME = os.getenv("PAL_NAME", "MAG")
-
-        # What the AI calls you in its system prompt
-        self.USER_NAME = os.getenv("USER_NAME", "User")
-
-        # Describe the bot's personality (e.g. "chill, sarcastic, supportive")
-        self.PERSONALITY = os.getenv("PERSONALITY", "chill, curious, supportive")
-
-        # Topics you're interested in (helps the AI know what you like)
-        self.INTERESTS = os.getenv("INTERESTS", "")
-
-        self.MAG_LANG = os.getenv("MAG_LANG", "")
-
-        # How long responses should be: "short", "medium", "long", or "1-2 sentences"
-        self.RESPONSE_LENGTH = os.getenv("RESPONSE_LENGTH", "short")
-
-        # === AI MODEL: which LLM to use via OpenRouter ===
-
-        # Model identifier on OpenRouter
-        # "openrouter/free" auto-routes to best free model
-        # Other examples: "deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free"
-        self.MODEL = os.getenv("MODEL", "openrouter/free")
-
-        # Max tokens the AI can generate per response
-        # Higher = longer responses but costs more
-        self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "500"))
-
-        # Creativity: 0.0 = very predictable, 1.0 = very random
-        self.TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
-
-        # === BEHAVIOR: how the bot acts ===
-
-        # Enable verbose logging to palbot.log
-        # Shows every prompt, AI response, latency, etc.
-        self.DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-
-        # Summarize old conversations for long-term memory.
-        # Every SUMMARY_INTERVAL messages, the AI generates a summary
-        # of what was discussed and stores it in the session.
-        # The summary is included in future prompts for context.
-        self.SUMMARIZE = os.getenv("SUMMARIZE", "false").lower() == "true"
-        self.SUMMARY_INTERVAL = int(os.getenv("SUMMARY_INTERVAL", "100"))
-
-        # Where to store the SQLite database file
-        self.DB_PATH = os.getenv("DB_PATH", "palbot.db")
-
-        # How many minutes of silence before a continuation expires
-        # If you talk again within this window, the bot treats it
-        # as continuing the conversation
-        self.HEURISTIC_CONTINUATION_MINUTES = int(
-            os.getenv("HEURISTIC_CONTINUATION_MINUTES", "2")
-        )
-
+        # Parse OWNER_NAMES: "12345:taya,67890:bob"
         raw_names = os.getenv("OWNER_NAMES", "")
-        self.OWNER_NAMES = {}
+        owner_names: dict[int, str] = {}
         if raw_names:
             for pair in raw_names.split(","):
                 pair = pair.strip()
                 if ":" in pair:
                     uid, name = pair.split(":", 1)
-                    self.OWNER_NAMES[int(uid.strip())] = name.strip()
-        self.NAME_TO_OWNER = {v: k for k, v in self.OWNER_NAMES.items()}
+                    owner_names[int(uid.strip())] = name.strip()
+        name_to_owner = {v: k for k, v in owner_names.items()}
 
-    def validate(self):
-        # Called at startup. If required config is missing,
-        # raises ValueError with a clear message.
-        # This fails FAST — better than mysterious runtime errors.
+        return cls(
+            disc_token=os.getenv("DISCORD_TOKEN", ""),
+            openrouter_key=os.getenv("OPENROUTER_API_KEY", ""),
+            owner_id=owner_id,
+            pal_name=os.getenv("PAL_NAME", "MAG"),
+            user_name=os.getenv("USER_NAME", "User"),
+            personality=os.getenv("PERSONALITY", "chill, curious, supportive"),
+            interests=os.getenv("INTERESTS", ""),
+            mag_lang=os.getenv("MAG_LANG", ""),
+            response_length=os.getenv("RESPONSE_LENGTH", "short"),
+            model=os.getenv("MODEL", "openrouter/free"),
+            max_tokens=int(os.getenv("MAX_TOKENS", "500")),
+            temperature=float(os.getenv("TEMPERATURE", "0.7")),
+            debug=os.getenv("DEBUG", "false").lower() == "true",
+            summarize=os.getenv("SUMMARIZE", "false").lower() == "true",
+            summary_interval=int(os.getenv("SUMMARY_INTERVAL", "100")),
+            db_path=os.getenv("DB_PATH", "palbot.db"),
+            heuristic_continuation_minutes=int(os.getenv("HEURISTIC_CONTINUATION_MINUTES", "2")),
+            owner_names=owner_names,
+            name_to_owner=name_to_owner,
+        )
 
+    def validate(self) -> None:
+        """Raise ValueError if required fields are missing."""
         missing = []
-        if not self.DISCORD_TOKEN:
+        if not self.disc_token:
             missing.append("DISCORD_TOKEN")
-        if not self.OPENROUTER_API_KEY:
+        if not self.openrouter_key:
             missing.append("OPENROUTER_API_KEY")
-        if self.OWNER_ID == 0:
+        if self.owner_id == 0:
             missing.append("OWNER_ID")
         if missing:
             raise ValueError(

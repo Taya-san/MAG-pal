@@ -210,7 +210,7 @@ class StreamIntervention:
 
     # ===== MATCHING =====
 
-    def check_match(self, word, reasoning_tokens):
+    async def check_match(self, word, reasoning_tokens):
         """
         Check if a completed word triggers a memory intervention.
         
@@ -251,7 +251,7 @@ class StreamIntervention:
             if self.cooldowns.get(sid, 0) > 0:
                 continue
 
-            # Fetch the block's aggregated keywords from DB
+            # Fetch the block's aggregated keywords from DB (fast in-memory SQLite, <1ms)
             top_words_list = self._get_sentence_top_words(sid)
             if not top_words_list:
                 continue
@@ -277,18 +277,18 @@ class StreamIntervention:
             context = None
             tier = None
 
-            # --- Tier 1: Deep (≥70% overlap) — return full block tree ---
+            # Tier 1: Deep (>=70% overlap)
             if ratio >= DEEP_THRESHOLD:
                 tree = self.store.get_block_tree(item['block_id']) if self.store else None
                 context = self._format_tree(tree) if tree else item['text']
                 tier = 'deep'
 
-            # --- Tier 2: Specific (structural word) — return matching child ---
+            # Tier 2: Specific (structural word)
             elif is_structural:
                 context = self._get_child_block(item['block_id'], word) if self.store else item['text']
                 tier = 'specific' if context else None
 
-            # --- Tier 3: Surface (≥1 word) — return parent paragraph ---
+            # Tier 3: Surface (>=1 word)
             else:
                 parent = self._get_parent_text(item['block_id']) if self.store else item['text']
                 context = parent or item['text']

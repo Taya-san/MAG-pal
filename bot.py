@@ -27,6 +27,7 @@ from openrouter import OpenRouterClient
 from responder import Responder, HeuristicResult
 from memory_store import MemoryStore
 from stream_intervention import StreamIntervention
+import commands
 
 logger = logging.getLogger("palbot")
 
@@ -189,50 +190,21 @@ class PalBot(discord.Client):
     # ---- COMMAND ROUTING ----
 
     async def _route_command(self, message):
-        # Routes commands starting with "!" to handler methods.
-        # Uses a dict lookup (O(1)) instead of if/elif chains.
-        #
-        # Format: !command [args]
-        # Split on maxsplit=1 so only the first word is the command,
-        # everything else is treated as arguments.
-
-        # .strip() first to handle leading whitespace
         parts = message.content.strip().split(maxsplit=1)
         cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
 
-        # Map of command → handler method
-        handlers = {
-            "!debug": self._cmd_debug,
-            "!kw": self._cmd_keywords,
-            "!remember": self._cmd_remember,
-            "!forget": self._cmd_forget,
-            "!bad": self._cmd_bad,
-            "!showprompt": self._cmd_showprompt,
-            "!stats": self._cmd_stats,
-            "!clear": self._cmd_clear,
-            "!alias": self._cmd_alias,
-            "!help": self._cmd_help,
-        }
-
-        handler = handlers.get(cmd)
+        handler = commands.HANDLERS.get(cmd)
 
         if handler:
-            # Wrap every command handler in try/except so one bad command
-            # can't crash the bot. Different exception types get
-            # user-friendly error messages.
             try:
-                await handler(message, args)
+                await handler(self, message, args)
             except discord.Forbidden:
-                await message.channel.send(
-                    "I don't have permission to do that."
-                )
+                await message.channel.send("I don't have permission to do that.")
             except discord.HTTPException as e:
                 await message.channel.send(f"Discord error: {e}")
             except Exception as e:
-                logger.error(
-                    f"Command {cmd} failed: {e}", exc_info=True
-                )
+                logger.error(f"Command {cmd} failed: {e}", exc_info=True)
                 await message.channel.send(f"Command failed: {e}")
         elif self.debug_mode:
             logger.info(f"[DEBUG] Unknown command: {cmd}")
@@ -427,7 +399,7 @@ class PalBot(discord.Client):
                             intervention.decrement_cooldowns(1)
 
                             for completed in intervention.buffer_token(token):
-                                match = intervention.check_match(
+                                match = await intervention.check_match(
                                     completed,
                                     partial_reasoning[-400:],
                                 )
@@ -448,7 +420,7 @@ class PalBot(discord.Client):
                         break
 
             for word in intervention.flush_buffer():
-                match = intervention.check_match(word, partial_reasoning[-400:])
+                match = await intervention.check_match(word, partial_reasoning[-400:])
                 if match:
                     current_prompt = self.responder.build_continuation_prompt(
                         current_prompt,
@@ -539,247 +511,6 @@ class PalBot(discord.Client):
                 f"Summarization failed for {channel_id}: {e}",
                 exc_info=True,
             )
-
-    # ---- COMMAND HANDLERS ----
-
-    async def _cmd_debug(self, message, args):
-        # Toggle debug mode on/off at runtime.
-        # When on, every message's AI prompt, latency, and
-        # decision is logged to palbot.log.
-        self.debug_mode = not self.debug_mode
-        await message.add_reaction("\u2705")  # checkmark reaction
-        await message.channel.send(
-            f"Debug mode: {'ON' if self.debug_mode else 'OFF'}"
-        )
-
-    async def _cmd_keywords(self, message, args):
-        # Lists all learned keywords with frequency and recency.
-        # 📌 marks words you added with !remember (manual).
-        keywords = await self.db.get_all_keywords()
-        if not keywords:
-            await message.channel.send("No keywords learned yet.")
-            return
-        lines = []
-        for kw in keywords:
-            tag = "\U0001f4cc" if kw["is_manual"] else "  "
-            lines.append(
-                f"{tag} {kw['keyword']} "
-                f"(freq: {kw['frequency']}, "
-                f"last: {kw['last_seen'][:10]})"
-            )
-        await message.channel.send(
-            f"**Keywords ({len(lines)}):**\n" + "\n".join(lines[:25])
-        )
-
-    async def _cmd_remember(self, message, args):
-        # Manually add a keyword (never decays, marked as manual).
-        # Usage: !remember <word>
-        if not args:
-            await message.channel.send("Usage: !remember <word>")
-            return
-        word = args.strip().lower()
-        await self.db.upsert_keyword(word, manual=True)
-        await message.add_reaction("\u2705")
-
-    async def _cmd_forget(self, message, args):
-        # Remove keywords.
-        # !forget <word> → remove specific keyword
-        # !forget         → remove ALL auto-learned keywords
-        if args:
-            word = args.strip().lower()
-            await self.db.remove_keyword(word)
-            await message.channel.send(f"Forgot '{word}'")
-        else:
-            await self.db.clear_keywords()
-            await message.channel.send(
-                "Cleared all auto-learned keywords."
-            )
-
-    async def _cmd_bad(self, message, args):
-        # Flag the last response as bad for review.
-        # Logs the user message + bot response to palbot.log
-        # so you can review and improve the system prompt.
-        # Per-channel: each channel has its own "last response."
-        info = self.last_response_info.get(message.channel.id)
-        if not info:
-            await message.channel.send(
-                "No previous response to flag in this channel."
-            )
-            return
-        logger.warning(
-            "[BAD] User: %s | Bot: %s",
-            info["user_message"],
-            info["bot_response"],
-        )
-        await message.channel.send(
-            "Flagged as bad response. Logged for review."
-        )
-
-    async def _cmd_showprompt(self, message, args):
-        # Shows the exact prompt that was sent to the AI for the
-        # last message in this channel. Useful for debugging:
-        # - Is the context correct?
-        # - Are the keywords what you expected?
-        # - Is the system prompt right?
-        #
-        # Truncated to 1900 characters (Discord message limit).
-        prompt = self.last_prompt.get(message.channel.id)
-        if not prompt:
-            await message.channel.send(
-                "No prompt available for this channel."
-            )
-            return
-        lines = []
-        for i, msg in enumerate(prompt):
-            role = msg["role"]
-            content = msg["content"]
-            lines.append(f"--- [{i}] {role} ---\n{content}\n")
-        full = "\n".join(lines)
-        if len(full) > 1900:
-            full = full[:1900] + "\n...(truncated)"
-        await message.channel.send(f"```\n{full}\n```")
-
-    async def _cmd_stats(self, message, args):
-        # Shows bot statistics: uptime, messages processed,
-        # AI calls, heuristic breakdown, token usage.
-        uptime = time.time() - self.stats["start_time"]
-        msg_count = await self.db.get_message_count()
-        text = (
-            f"**Stats:**\n"
-            f"Uptime: {uptime/3600:.1f}h\n"
-            f"Messages processed: {self.stats['messages_processed']}\n"
-            f"AI calls: {self.stats['ai_calls']}\n"
-            f"  Heuristic respond: {self.stats['heuristic_respond']}\n"
-            f"  Heuristic skip: {self.stats['heuristic_skip']}\n"
-            f"  Heuristic ask AI: {self.stats['heuristic_ask_ai']}\n"
-            f"  Heuristic silent: {self.stats['heuristic_silent']}\n"
-            f"Total tokens: {self.stats['total_tokens']}\n"
-            f"DB messages: {msg_count}"
-        )
-        await message.channel.send(text)
-
-    async def _cmd_clear(self, message, args):
-        if args.strip().lower() != "confirm":
-            await message.channel.send(
-                "\u26a0\ufe0f This will delete ALL message history "
-                "and reset session data.\n"
-                "Type `!clear confirm` to proceed."
-            )
-            return
-        await self.db.clear_messages()
-        await message.channel.send("Cleared all message history.")
-        await message.add_reaction("\u2705")
-
-    async def _cmd_alias(self, message, args):
-        """Manage private nickname aliases: !alias add <nick> for <user>, list, remove."""
-        parts = args.strip().split()
-        if not parts:
-            await message.channel.send(
-                "**!alias usage:**\n"
-                "`!alias add <nickname> for <username>` — nick someone\n"
-                "`!alias list` — show your nicknames\n"
-                "`!alias remove <nickname>` — remove a nickname"
-            )
-            return
-
-        sub = parts[0].lower()
-        owner = self.config.OWNER_ID
-
-        if sub == "list":
-            aliases = await self.db.get_aliases(owner)
-            if not aliases:
-                await message.channel.send("You have no aliases set.")
-                return
-            lines = []
-            for row in aliases:
-                res_name = self.config.OWNER_NAMES.get(row["resolves_to"], str(row["resolves_to"]))
-                lines.append(f"  {row['alias']} -> {res_name}")
-            await message.channel.send("**Your aliases:**\n" + "\n".join(lines))
-            return
-
-        if sub == "remove":
-            if len(parts) < 2:
-                await message.channel.send("Usage: `!alias remove <nickname>`")
-                return
-            await self.db.remove_alias(owner, parts[1])
-            await message.channel.send(f"Removed alias '{parts[1].lower()}'")
-            await message.add_reaction("\u2705")
-            return
-
-        if sub == "add":
-            try:
-                for_idx = parts.index("for")
-                nickname = parts[1:for_idx]
-                target_name = parts[for_idx + 1:]
-            except (ValueError, IndexError):
-                await message.channel.send(
-                    "Usage: `!alias add <nickname> for <username>`\n"
-                    "Example: `!alias add bintang for taya`"
-                )
-                return
-
-            nickname = " ".join(nickname).lower().strip()
-            target_name = " ".join(target_name).lower().strip()
-
-            if not nickname or not target_name:
-                await message.channel.send("Both nickname and target name are required.")
-                return
-
-            target_id = self.config.NAME_TO_OWNER.get(target_name)
-            if not target_id:
-                await message.channel.send(
-                    f"Unknown user '{target_name}'. I don't know who that is.\n"
-                    f"Known names: {', '.join(self.config.NAME_TO_OWNER.keys())}"
-                )
-                return
-
-            await self.db.add_alias(owner, nickname, target_id)
-            await message.channel.send(
-                f"Got it! '{nickname}' now refers to {target_name}."
-            )
-            await message.add_reaction("\u2705")
-            return
-
-        await message.channel.send(f"Unknown subcommand '{sub}'. Try `!alias` for help.")
-
-    async def resolve_mention(self, owner_id, text):
-        """Check if any word in the message matches a known alias. Returns target owner_id or None."""
-        words = set(text.lower().split())
-        aliases = await self.db.get_aliases(owner_id)
-        for row in aliases:
-            if row["alias"] in words:
-                return row["resolves_to"]
-        return None
-
-    async def _cmd_help(self, message, args):
-        # Lists all available commands with brief descriptions.
-        text = (
-            "**Commands:**\n"
-            "`!debug` \u2014 Toggle debug mode\n"
-            "`!kw` \u2014 Show learned keywords\n"
-            "`!remember <word>` \u2014 Manually add a keyword\n"
-            "`!forget <word>` \u2014 Remove a keyword\n"
-            "`!forget` \u2014 Clear all auto-keywords\n"
-            "`!bad` \u2014 Flag last response as bad\n"
-            "`!showprompt` \u2014 Show the last AI prompt\n"
-            "`!stats` \u2014 Show bot statistics\n"
-            "`!clear` \u2014 Clear message history\n"
-            "`!help` \u2014 Show this message"
-        )
-        await message.channel.send(text)
-
-    # ---- BACKGROUND TASKS ----
-
-    @tasks.loop(hours=6)
-    async def keyword_decay_loop(self):
-        # Runs every 6 hours in the background.
-        # Calls decay_keywords which reduces frequency of keywords
-        # not seen in 7+ days. Old/unused topics fade away naturally.
-        #
-        # This runs as a discord.py task loop, which means it:
-        # - Starts in setup_hook
-        # - Waits for the bot to be ready (before_loop)
-        # - Automatically stops if the bot disconnects
         # - Logs and continues on error
         try:
             logger.info("Running keyword decay...")
