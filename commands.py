@@ -1,9 +1,16 @@
 """
 Command handlers for PalBot — extracted from bot.py for clean separation.
 
-Each !command maps to a method here. Called by bot._route_command()
-which dispatches to these handlers. All handlers receive (bot, message, args)
-instead of using self, keeping bot.py as the orchestrator.
+Each !command maps to a handler function here. Called by bot._route_command()
+in bot.py which dispatches using the HANDLERS dict.
+
+Instead of being methods on the bot class (self), these are standalone
+functions that receive (bot, message, args). The 'bot' parameter is
+the PalBot instance, giving access to bot.db, bot.config, etc.
+
+This separation means commands can be tested without a Discord connection:
+
+    result = await cmd_stats(mock_bot, mock_message, "")
 """
 
 import logging
@@ -16,7 +23,7 @@ logger = logging.getLogger("palbot")
 async def cmd_debug(bot, message, args):
     """Toggle debug mode on/off at runtime."""
     bot.debug_mode = not bot.debug_mode
-    await message.add_reaction("\u2705")
+    await message.add_reaction("\u2705")  # checkmark emoji
     await message.channel.send(f"Debug mode: {'ON' if bot.debug_mode else 'OFF'}")
 
 
@@ -28,6 +35,7 @@ async def cmd_keywords(bot, message, args):
         return
     lines = []
     for kw in keywords:
+        # 📌 (pushpin emoji) marks manual keywords (from !remember) vs auto-learned
         tag = "\U0001f4cc" if kw["is_manual"] else "  "
         lines.append(f"{tag} {kw['keyword']} (freq: {kw['frequency']}, last: {kw['last_seen'][:10]})")
     await message.channel.send(f"**Keywords ({len(lines)}):**\n" + "\n".join(lines[:25]))
@@ -39,23 +47,24 @@ async def cmd_remember(bot, message, args):
         await message.channel.send("Usage: !remember <word>")
         return
     word = args.strip().lower()
+    # manual=True means this keyword is EXEMPT from decay
     await bot.db.upsert_keyword(word, manual=True)
     await message.add_reaction("\u2705")
 
 
 async def cmd_forget(bot, message, args):
-    """Remove keywords: !forget <word> or !forget (clear all auto-learned)."""
+    """Remove keywords. !forget <word> or !forget to clear all auto."""
     if args:
         word = args.strip().lower()
         await bot.db.remove_keyword(word)
         await message.channel.send(f"Forgot '{word}'")
     else:
-        await bot.db.clear_keywords()
+        await bot.db.clear_keywords()  # removes only auto-learned, keeps manual
         await message.channel.send("Cleared all auto-learned keywords.")
 
 
 async def cmd_bad(bot, message, args):
-    """Flag the last response as bad for review. Logs for inspection."""
+    """Flag the last bot response as bad for review."""
     info = bot.last_response_info.get(message.channel.id)
     if not info:
         await message.channel.send("No previous response to flag in this channel.")
@@ -74,13 +83,14 @@ async def cmd_showprompt(bot, message, args):
     for i, msg in enumerate(prompt):
         lines.append(f"--- [{i}] {msg['role']} ---\n{msg['content']}\n")
     full = "\n".join(lines)
+    # Discord has a 2000 character limit per message
     if len(full) > 1900:
         full = full[:1900] + "\n...(truncated)"
     await message.channel.send(f"```\n{full}\n```")
 
 
 async def cmd_stats(bot, message, args):
-    """Show bot statistics: uptime, messages, AI calls, heuristics, tokens."""
+    """Show bot statistics: uptime, messages, AI calls, heuristic breakdown."""
     uptime = time.time() - bot.stats["start_time"]
     msg_count = await bot.db.get_message_count()
     text = (
@@ -99,7 +109,7 @@ async def cmd_stats(bot, message, args):
 
 
 async def cmd_clear(bot, message, args):
-    """Delete ALL message history. Requires !clear confirm."""
+    """Delete ALL message history. Requires !clear confirm (safety)."""
     if args.strip().lower() != "confirm":
         await message.channel.send(
             "\u26a0\ufe0f This will delete ALL message history and reset session data.\n"
@@ -112,7 +122,17 @@ async def cmd_clear(bot, message, args):
 
 
 async def cmd_alias(bot, message, args):
-    """Manage private nickname aliases: add, list, remove."""
+    """
+    Manage private nickname aliases.
+    
+    Syntax:
+      !alias add <nickname> for <username>  — map nickname to a user
+      !alias list                            — show your nicknames
+      !alias remove <nickname>               — remove a nickname
+    
+    Aliases are PRIVATE per-user. User A can call user B "bintang"
+    and user B has no idea. Each user manages their own namespace.
+    """
     parts = args.strip().split()
     if not parts:
         await message.channel.send(
@@ -133,6 +153,7 @@ async def cmd_alias(bot, message, args):
             return
         lines = []
         for row in aliases:
+            # Look up the display name for this owner_id
             res_name = bot.config.OWNER_NAMES.get(row["resolves_to"], str(row["resolves_to"]))
             lines.append(f"  {row['alias']} -> {res_name}")
         await message.channel.send("**Your aliases:**\n" + "\n".join(lines))
@@ -148,6 +169,7 @@ async def cmd_alias(bot, message, args):
         return
 
     if sub == "add":
+        # Parse: !alias add <nickname> for <username>
         try:
             for_idx = parts.index("for")
             nickname_parts = parts[1:for_idx]
@@ -163,11 +185,11 @@ async def cmd_alias(bot, message, args):
             await message.channel.send("Both nickname and target name are required.")
             return
 
+        # Resolve the target name to an owner_id using config's NAME_TO_OWNER
         target_id = bot.config.NAME_TO_OWNER.get(target_name)
         if not target_id:
             await message.channel.send(
-                f"Unknown user '{target_name}'. I don't know who that is.\n"
-                f"Known names: {', '.join(bot.config.NAME_TO_OWNER.keys())}"
+                f"Unknown user '{target_name}'. Known: {', '.join(bot.config.NAME_TO_OWNER.keys())}"
             )
             return
 
@@ -199,7 +221,12 @@ async def cmd_help(bot, message, args):
 
 
 async def resolve_mention(bot, owner_id: int, text: str) -> int | None:
-    """Check if any word in the message matches a known alias. Returns target owner_id or None."""
+    """
+    Check if any word in the message matches a known alias.
+    
+    Returns:
+        The target owner_id the alias resolves to, or None.
+    """
     words = set(text.lower().split())
     aliases = await bot.db.get_aliases(owner_id)
     for row in aliases:
@@ -208,8 +235,9 @@ async def resolve_mention(bot, owner_id: int, text: str) -> int | None:
     return None
 
 
-# Dict mapping command strings to handler functions
-# Used by bot._route_command() for O(1) dispatch
+# Handler dispatch map.
+# bot._route_command() does: handler = commands.HANDLERS.get(cmd)
+# This is O(1) dict lookup instead of if/elif chains.
 HANDLERS = {
     "!debug": cmd_debug,
     "!kw": cmd_keywords,

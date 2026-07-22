@@ -2,39 +2,23 @@
 Stream Intervention — real-time memory injection during AI reasoning.
 
 During streaming generation, the bot scans the model's chain-of-thought
-reasoning tokens for keywords that match previously-flagged "interesting"
-sentences from past conversations stored in the MemoryStore.
+reasoning tokens for keywords that match previously-flagged sentences
+from past conversations stored in MemoryStore.
 
 When a match fires, the bot interrupts the stream, re-prompts the AI with
-the recalled memory as context, and resumes generation — all before the user
-sees any output. This is designed to boost small models (8B-35B) by giving
-them access to hierarchical long-term memory during reasoning.
+the recalled memory as context, and resumes generation — all before the
+user sees any output. This is designed to boost small models (8B-35B) by
+giving them access to hierarchical long-term memory during reasoning.
 
-How it works:
-
-1. BUILD PHASE (once):
-   build_index() queries MemoryStore for all flagged sentences,
-   builds an inverted index: {lowercase_word: [sentence_id, ...]}.
-   Structural type words ("code", "table", etc.) are indexed only
-   when the block or its children actually match that type.
-
-2. SCAN PHASE (per reasoning token):
-   buffer_token() accumulates sub-word streaming tokens into
-   complete words using a regex boundary detector. Completed
-   words are emitted and checked against the keyword index.
-
-3. MATCH PHASE (per completed word):
-   check_match() looks up the word in the keyword index, fetches
-   the sentence's block-level top_words, filters out generic
-   injected keywords, computes a match ratio, and decides the tier:
-     - deep (≥70%): returns full block tree
-     - specific (structural word): returns matching child block
-     - surface (≥1 word): returns parent paragraph
-
-4. COOLDOWN PHASE:
-   Each injected sentence gets a 150-token cooldown, preventing
-   re-injection within the same response. Cooldowns decrement
-   per reasoning token and decay by 50% of output length.
+Four phases:
+1. BUILD: build_match_index() creates an inverted keyword index from
+   all flagged sentences in the MemoryStore.
+2. SCAN: buffer_token() assembles streaming sub-word tokens into complete
+   words using regex word-boundary detection.
+3. MATCH: check_match() compares completed words against the keyword index
+   and decides which tier of context to return (surface/deep/specific).
+4. COOLDOWN: each injected sentence gets a 150-token cooldown, preventing
+   re-injection within the same response.
 """
 
 import json
@@ -45,18 +29,20 @@ from text_utils import filter_injected_keywords
 logger = logging.getLogger("palbot")
 
 # === CONSTANTS ===
+# These control the behavior of the intervention system.
+# They're module-level so tests can import and check them.
 
-COOLDOWN_LIMIT = 150           # reasoning tokens before a sentence can trigger again
-OUTPUT_DECAY_RATIO = 0.5       # fraction of output length applied as extra cooldown decay
-DEEP_THRESHOLD = 0.7           # fraction of top_words that must match for deep tier
-WORD_MIN_LEN = 3               # minimum characters for a word to be considered
+COOLDOWN_LIMIT = 150      # How many reasoning tokens before same sentence can trigger again
+OUTPUT_DECAY_RATIO = 0.5  # After response, reduce cooldowns by 50% of output length
+DEEP_THRESHOLD = 0.7      # Minimum ratio of matched keywords for "deep" tier (>=70%)
+WORD_MIN_LEN = 3          # Ignore words shorter than 3 characters (a, an, to, etc.)
 
 # Structural type names that trigger the "specific" tier.
-# When the AI mentions one of these words in reasoning, and a matching
-# block exists, the specific child block is injected directly.
+# When the AI mentions one of these during reasoning, and the memory
+# store has a block of that type, the specific child block is injected.
 STRUCTURAL_NAMES = {'table', 'tables', 'code', 'list', 'lists', 'equation', 'equations'}
 
-# Maps plural/alias structural words to canonical block types.
+# Maps plural/singular structural words to canonical block types.
 # Used by _get_child_block() to find the right child block.
 TYPE_MAP = {
     'table': 'table', 'tables': 'table',
@@ -68,51 +54,64 @@ TYPE_MAP = {
 
 class StreamIntervention:
     """
-    Per-call intervention engine for scanning streaming reasoning tokens.
+    Per-call intervention engine that scans streaming reasoning tokens.
     
-    Instances are created fresh for each _stream_with_intervention() call
-    to provide per-call isolation of cooldowns and word buffer. The
-    keyword_index is shared via reference from a master instance so
-    all calls share the same matchable keyword set.
+    Each AI call gets its OWN instance of StreamIntervention (created
+    in bot.py:_stream_with_intervention). This gives each concurrent
+    call its own:
+      - cooldowns dict (whose memory was injected, when)
+      - word_buffer (sub-word tokens being assembled)
+    
+    BUT all instances share the same keyword_index (a dict passed by
+    reference). This means the memory contents are shared across calls
+    while the cooldowns and buffers are isolated.
     
     Args:
-        memory_store: MemoryStore instance for DB queries (optional if shared_index given).
-        shared_index: Pre-built keyword_index dict to share across calls.
-        owner_id: Discord user ID for filtering flagged sentences by owner.
+        memory_store: MemoryStore instance for DB queries. Not needed
+                     if shared_index is provided (per-call instance).
+        shared_index: Pre-built keyword_index dict. When provided, the
+                     instance skips build_index() and uses this directly.
+        owner_id: Discord user ID. Filters memory to only this user's
+                 flagged sentences and public (NULL) ones.
     """
     
     def __init__(self, memory_store=None, shared_index=None, owner_id=None):
         self.store = memory_store
         self.owner_id = owner_id
         
-        # If shared_index is provided, use it directly (per-call instance
-        # shares the master's index). Otherwise, build from store.
+        # If a shared_index is provided, use it directly. This avoids
+        # rebuilding the index for every per-call instance.
         if shared_index is not None:
             self.keyword_index = shared_index
         else:
             self.keyword_index = {}
             
-        # Per-call mutable state — each concurrent stream gets its own
+        # Per-call mutable state — each concurrent call gets fresh copies
         self.cooldowns = {}      # {sentence_id: remaining_tokens}
-        self.word_buffer = ""    # accumulates sub-word tokens into complete words
+        self.word_buffer = ""    # accumulates sub-word characters into complete words
         
-        # Only build index if we have a store and no shared index
+        # Only build index if we have a store AND no shared index
         if shared_index is None and memory_store is not None:
             self.build_index()
 
     # ===== INDEX BUILDING =====
+    # The keyword index is an INVERTED INDEX: {lowercase_word: [sentence_info]}.
+    # For every flagged sentence, every keyword in its block's top_words gets
+    # an entry pointing back to that sentence. So "matrix" might point to
+    # 5 different sentences from 3 different blocks.
 
     def build_index(self):
         """
-        Build the inverted keyword index from MemoryStore.
+        Build the keyword index from MemoryStore.
         
-        Calls build_match_index() which queries all flagged sentences,
-        filters by owner_id (if set), and returns a dict of
-        {lowercase_word: [{sentence_id, text, block_id, block_type}]}.
+        Calls MemoryStore.build_match_index(self.owner_id) which runs:
+          SELECT sentences with label='flagged'
+          JOIN their blocks for top_words
+          Filter WHERE (owner_id IS NULL OR owner_id = ?)
+          Return {keyword: [{sentence_id, text, block_id, block_type}]}
         
-        The index maps every content keyword from every flagged block
-        to every sentence in that block, so a single keyword can point
-        to multiple sentences from the same block.
+        The index is stored in self.keyword_index and is shared across
+        per-call instances via reference.
         """
         if not self.store:
             self.keyword_index = {}
@@ -122,11 +121,11 @@ class StreamIntervention:
 
     def rebuild_index(self):
         """
-        Rebuild the index in-place so shared references stay valid.
+        Rebuild the index IN-PLACE so shared references stay valid.
         
-        Instead of assigning a new dict (which would break shared
-        references in per-call instances), we clear and update
-        the existing dict object in-place.
+        If we did self.keyword_index = new_dict, per-call instances that
+        hold a reference to OLD dict would never see the update.
+        Instead, we .clear() and .update() the existing dict object.
         """
         if not self.store:
             return
@@ -136,46 +135,76 @@ class StreamIntervention:
         logger.info(f"Rebuilt intervention index: {len(self.keyword_index)} keywords")
 
     # ===== WORD BUFFERING =====
+    # Streaming APIs send SUB-WORD tokens (like "sym", "metric").
+    # These are NOT full words. We need to:
+    #   1. Accumulate tokens in a buffer
+    #   2. Detect when a complete word has been received
+    #   3. Extract the complete word
+    #   4. Check it against the keyword index
+    #
+    # The regex pattern that does this:
+    #   (?:^|\W)([a-zA-Z]{3,})\W
+    #
+    # Breaking this down:
+    #   (?:^|\W)  = start of string OR any non-word character (space, punctuation)
+    #   ([a-zA-Z]{3,}) = 3+ alphabetic characters (the word to capture)
+    #   \W        = a non-word character AFTER the word (confirms it's complete)
+    #
+    # So "symmetric " matches because:
+    #   (?:^|\W) matches the space before "symmetric"
+    #   ([a-zA-Z]{3,}) captures "symmetric"
+    #   \W matches the space after
+    #
+    # But "symmetri" (no trailing char) doesn't match — the word isn't complete.
 
-    def buffer_token(self, token):
+    def buffer_token(self, token: str) -> list[str]:
         """
-        Accumulate a streaming sub-word token and emit completed words.
+        Feed a streaming sub-word token and get back completed words.
         
-        Streaming APIs send sub-word tokens like "s", "ym", "metric".
-        This method appends each token to an internal buffer and uses
-        a regex to detect word boundaries (non-word characters like
-        spaces, punctuation, newlines).
+        Imagine the API sends these tokens in sequence:
+          " pro", "perty", " of", " sym", "metric", " matric", "es."
         
-        The regex pattern: (?:^|\\W)([a-zA-Z]{3,})\\W
-        - (?:^|\\W): start of buffer or a non-word char before the word
-        - ([a-zA-Z]{3,}): the word (minimum 3 letters)
-        - \\W: a non-word char after the word (space, punctuation)
-        
-        A word is only emitted when followed by a boundary character —
-        this prevents premature extraction of partial words.
+        buffer_token processes each one:
+          1. Appends " pro" to buffer: buffer = " pro"
+             No trailing \W — nothing emitted.
+          2. Appends "perty": buffer = " property"
+             Still no trailing \W — nothing emitted.
+          3. Appends " of": buffer = " property of"
+             Regex finds " property " → emits "property". Buffer = " of"
+          4. Appends " sym": buffer = " of sym"
+             No complete word — nothing emitted.
+          5. Appends "metric": buffer = " of symmetric"
+             No trailing \W — nothing emitted.
+          6. Appends " matric": buffer = " of symmetric matric"
+             Regex finds " symmetric " → emits "symmetric". Buffer = "matric"
+          7. Appends "es.": buffer = "matrices."
+             Regex finds "matrices." → emits "matrices". Buffer = "."
         
         Returns:
-            List of completed words (may be empty if no boundary found).
+            List of lowercase completed words (may be empty).
         """
         self.word_buffer += token
         emitted = []
         while True:
+            # re.search finds the FIRST match anywhere in the buffer
             m = re.search(r'(?:^|\W)([a-zA-Z]{3,})\W', self.word_buffer)
             if not m:
                 break
+            # m.group(1) is the captured word (letters only, no surrounding chars)
             word = m.group(1).lower()
+            # Remove the matched portion from the buffer
             self.word_buffer = self.word_buffer[m.end():]
             emitted.append(word)
         return emitted
 
     @staticmethod
-    def _buf_extract(buffer):
+    def _buf_extract(buffer: str) -> tuple[list[str], str]:
         """
-        Static utility: extract completed words from a buffer string.
+        Static version of buffer_token. Same logic, but operates on
+        a passed-in string instead of self.word_buffer.
         
-        Same regex logic as buffer_token() but operates on a passed-in
-        string instead of the instance buffer. Returns (words, remaining).
-        Used for testing and debugging.
+        Returns:
+            (extracted_words_list, remaining_buffer_string)
         """
         emitted = []
         while True:
@@ -187,16 +216,19 @@ class StreamIntervention:
             emitted.append(word)
         return emitted, buffer
 
-    def flush_buffer(self):
+    def flush_buffer(self) -> list[str]:
         """
-        Extract any trailing word left in the buffer at stream end.
+        Extract the last word from the buffer at stream end.
         
-        Unlike buffer_token(), this uses a different regex anchored
-        to the end of the buffer ($). It extracts a word of 3+ letters
-        that has no trailing boundary character (stream ended mid-token).
+        Unlike buffer_token(), this uses a DIFFERENT regex that
+        doesn't require a trailing boundary character:
+          (?:^|\W)?([a-zA-Z]{3,})$
+        
+        The $ anchors to the END of the string. This extracts
+        anything left in the buffer when the stream ends.
         
         Returns:
-            List containing the single trailing word, or empty list.
+            List with one trailing word, or empty list if buffer is clean.
         """
         m = re.match(r'(?:^|\W)?([a-zA-Z]{3,})$', self.word_buffer)
         if not m:
@@ -205,41 +237,42 @@ class StreamIntervention:
         return [m.group(1).lower()]
 
     def reset_buffer(self):
-        """Clear the word buffer — called in finally block for cleanup."""
+        """Clear the word buffer. Called in finally block for cleanup."""
         self.word_buffer = ""
 
     # ===== MATCHING =====
+    # This is the core algorithm. For a completed word:
+    #   1. Look up the word in the keyword index
+    #   2. For each matching sentence (skip if on cooldown):
+    #      a. Get the sentence's block-level top_words from DB
+    #      b. Strip generic injected keywords (for ratio purity)
+    #      c. Count how many of these appear in recent reasoning
+    #      d. Compute ratio = matched / total_clean_keywords
+    #   3. Decide tier based on ratio and word type
+    #   4. Pick the highest-ratio match across all candidates
+    #   5. Set cooldown on the winning sentence
 
-    async def check_match(self, word, reasoning_tokens):
+    async def check_match(self, word: str, reasoning_tokens: list[str]) -> dict | None:
         """
         Check if a completed word triggers a memory intervention.
         
-        Algorithm:
-        1. Look up the word in the keyword_index dict.
-        2. For each matching sentence (skipping those on cooldown):
-           a. Fetch the sentence's block-level top_words from the DB.
-           b. Filter out generic injected keywords (function, example, etc.)
-              via filter_injected_keywords() to get clean content words.
-           c. Scan the last N reasoning tokens for matches against clean_top.
-           d. Compute ratio = matched_words / len(clean_top).
-        3. Decide the tier:
-           - deep: ratio >= DEEP_THRESHOLD (0.7)
-           - specific: word is a STRUCTURAL_NAME and child block exists
-           - surface: default, returns parent paragraph text
-        4. Sort candidates by ratio descending, pick the best one.
-        5. Set cooldown on the winning sentence_id.
+        NOTE: marked async for future async DB compatibility.
+        Currently all internal calls are sync (fast SQLite reads <1ms).
         
         Args:
-            word: Lowercase completed word to check.
-            reasoning_tokens: List of recent raw reasoning tokens for
-                             cross-checking other words in the same block.
+            word: The completed lowercase word to check.
+            reasoning_tokens: List of recent raw reasoning tokens
+                             (for cross-checking other keywords).
         
         Returns:
-            dict with tier, sentence_id, context, matched_word, ratio
-            or None if no match found.
+            Dict with tier, sentence_id, context, matched_word, ratio
+            or None if no match found or all candidates on cooldown.
         """
+        # Skip short words and empty indexes
         if len(word) < WORD_MIN_LEN or not self.keyword_index:
             return None
+            
+        # O(1) dict lookup for the word
         matches = self.keyword_index.get(word)
         if not matches:
             return None
@@ -247,48 +280,61 @@ class StreamIntervention:
         candidates = []
         for item in matches:
             sid = item['sentence_id']
-            # Skip sentences on cooldown (recently injected)
+            
+            # Cooldown check: skip if this sentence was recently injected
             if self.cooldowns.get(sid, 0) > 0:
                 continue
 
-            # Fetch the block's aggregated keywords from DB (fast in-memory SQLite, <1ms)
+            # Fetch the block's aggregated keywords from DB.
+            # This is a fast in-memory SQLite read (<1ms).
             top_words_list = self._get_sentence_top_words(sid)
             if not top_words_list:
                 continue
 
-            # Strip generic type keywords for ratio calculation.
-            # We only count content words (eigenvalues, matrix, gradient),
-            # not structural descriptors (function, example, property).
+            # Strip generic injected keywords for the RATIO calculation.
+            # We ONLY count content words (eigenvalues, matrix, gradient),
+            # NOT structural descriptors (function, example, property).
+            # This prevents generic words from inflating the match ratio.
             clean_top = filter_injected_keywords(top_words_list)
             if not clean_top:
                 continue
 
             # Count how many of the block's content keywords appear
             # in the recent reasoning tokens.
-            matched_words = {word}
+            matched_words = {word}  # start with the triggering word
             for raw in reasoning_tokens:
+                # Strip non-letter chars from the raw token
                 wc = re.sub(r'[^a-z]', '', raw.lower())
                 if wc in clean_top:
                     matched_words.add(wc)
 
+            # ratio = matched / total_content_keywords
             ratio = len(matched_words) / len(clean_top)
+            
+            # Check if the trigger word is a structural type name
             is_structural = word.lower() in STRUCTURAL_NAMES
 
             context = None
             tier = None
 
-            # Tier 1: Deep (>=70% overlap)
+            # === TIER 1: DEEP (>=70% overlap) ===
+            # The AI reasoning strongly overlaps with this memory.
+            # Return the FULL BLOCK TREE (parent text + all children).
             if ratio >= DEEP_THRESHOLD:
                 tree = self.store.get_block_tree(item['block_id']) if self.store else None
                 context = self._format_tree(tree) if tree else item['text']
                 tier = 'deep'
 
-            # Tier 2: Specific (structural word)
+            # === TIER 2: SPECIFIC (structural word) ===
+            # The AI mentioned "code" or "table". Return just that
+            # specific child block.
             elif is_structural:
                 context = self._get_child_block(item['block_id'], word) if self.store else item['text']
                 tier = 'specific' if context else None
 
-            # Tier 3: Surface (>=1 word)
+            # === TIER 3: SURFACE (everything else) ===
+            # The AI mentioned a concept in passing. Return the
+            # parent paragraph that introduced this topic.
             else:
                 parent = self._get_parent_text(item['block_id']) if self.store else item['text']
                 context = parent or item['text']
@@ -300,11 +346,11 @@ class StreamIntervention:
         if not candidates:
             return None
 
-        # Pick the highest-ratio match (best candidate)
+        # Sort candidates by ratio (highest first)
         candidates.sort(key=lambda x: -x[0])
         best_ratio, best_tier, best_sid, best_context, best_word = candidates[0]
         
-        # Lock this sentence for COOLDOWN_LIMIT reasoning tokens
+        # Set cooldown: this sentence can't trigger again for COOLDOWN_LIMIT tokens
         self.cooldowns[best_sid] = COOLDOWN_LIMIT
         logger.info(f"Intervention: {best_tier} match on '{best_word}' ({best_ratio:.0%} overlap)")
         
@@ -317,13 +363,19 @@ class StreamIntervention:
         }
 
     # ===== COOLDOWN MANAGEMENT =====
+    # Cooldowns prevent the same sentence from being injected repeatedly.
+    # Each sentence gets a counter. Every reasoning token decrements all
+    # counters. When a counter hits 0, the sentence can trigger again.
 
-    def decrement_cooldowns(self, n=1):
+    def decrement_cooldowns(self, n: int = 1):
         """
-        Reduce all active cooldowns by n tokens.
+        Reduce ALL active cooldowns by n (default 1).
         
-        Called once per reasoning token. When a cooldown hits 0 or below,
+        Called once per reasoning token. When a cooldown reaches 0,
         the sentence becomes eligible for re-injection.
+        
+        Args:
+            n: Number to subtract from each active cooldown.
         """
         expired = []
         for sid, remaining in self.cooldowns.items():
@@ -335,14 +387,17 @@ class StreamIntervention:
         for sid in expired:
             del self.cooldowns[sid]
 
-    def apply_output_decay(self, output_length):
+    def apply_output_decay(self, output_length: int):
         """
-        Accelerate cooldown expiration after stream completion.
+        Accelerate cooldown expiration based on output length.
         
-        The output word count serves as a proxy for "how far past
-        the injected memory are we now?" — reducing cooldowns by
-        50% of the output length means previously-injected sentences
-        become available sooner for the next message.
+        After the AI's response is generated, cooldowns are reduced by
+        50% of the output word count. This is a heuristic:
+        "the more words the AI produced after an injection, the further
+        it's moved past that topic, so cooldown should expire faster."
+        
+        Args:
+            output_length: Number of words in the final response.
         """
         decay = int(output_length * OUTPUT_DECAY_RATIO)
         expired = []
@@ -356,15 +411,21 @@ class StreamIntervention:
             del self.cooldowns[sid]
 
     # ===== DB HELPERS =====
+    # These methods query the MemoryStore database to fetch context
+    # for the different tiers. They're called synchronously because
+    # SQLite in-memory queries complete in <1ms.
 
-    def _get_sentence_top_words(self, sentence_id):
+    def _get_sentence_top_words(self, sentence_id: int) -> list[str]:
         """
         Fetch the block-level top_words for a sentence.
         
-        The top_words are stored on the block, not the sentence —
+        top_words are stored on the BLOCK (not the sentence) because
         they represent the aggregated keywords of the entire block
         (code block, table, paragraph) that this sentence belongs to.
         
+        Args:
+            sentence_id: The sentence's database ID.
+            
         Returns:
             List of keyword strings, or empty list if not found.
         """
@@ -381,14 +442,20 @@ class StreamIntervention:
             return []
         return json.loads(row[0])
 
-    def _get_parent_text(self, block_id):
+    def _get_parent_text(self, block_id: int) -> str | None:
         """
         Get the parent block's text for a child block.
         
-        For surface-tier matches, we return the paragraph that
-        introduced this code/table/list/equation — the parent's
-        text that provides context.
+        For surface-tier matches, we want the PARAGRAPH that introduced
+        this code/table/list/equation — the parent's text provides
+        the context that was lost when we jumped into inline content.
         
+        The SQL joins block_relations (parent-child links) with blocks
+        to get the parent's text for this child.
+        
+        Args:
+            block_id: The child block's ID.
+            
         Returns:
             Parent text string, or None if no parent exists.
         """
@@ -403,14 +470,21 @@ class StreamIntervention:
         row = cur.fetchone()
         return row[0] if row else None
 
-    def _get_child_block(self, block_id, structural_word):
+    def _get_child_block(self, block_id: int, structural_word: str) -> str | None:
         """
         Get the text of a specific child block by type.
         
-        For specific-tier matches, the AI mentioned a structural
-        type name ("table", "code"). We return that specific child
-        block's text. If the block itself is the target type, we
-        return its own text.
+        For specific-tier matches, the AI mentioned a structural type
+        name ("code", "table"). We return that specific child block's
+        text. If the block itself is the target type, return its own
+        text (for orphan blocks).
+        
+        Args:
+            block_id: Block ID to search under.
+            structural_word: "code", "table", "list", or "equation".
+            
+        Returns:
+            The child block's text, or None if not found.
         """
         if not self.store:
             return None
@@ -428,17 +502,24 @@ class StreamIntervention:
             return block['text']
         return None
 
-    def _format_tree(self, node):
+    def _format_tree(self, node: dict) -> str:
         """
-        Format a block tree as text for deep-tier injection.
+        Format a block tree as a string for deep-tier injection.
         
         Deep tier returns the full hierarchy: parent text + all children.
-        Code blocks get pipe-prefixed lines (|), other content gets
-        bullet-prefixed lines (-). Truncated to 200 chars per child.
+        Code blocks get pipe-prefixed (|), other content gets dash (-).
+        Each child is truncated to 200 characters for prompt economy.
+        
+        Args:
+            node: Dict with 'text' and 'children' keys (from get_block_tree).
+            
+        Returns:
+            Formatted multi-line string.
         """
         lines = [node['text']]
         for c in node.get('children', []):
             ctype = c.get('type', 'paragraph')
+            # Use different prefixes for different content types
             prefix = '  | ' if ctype == 'code' else '  - '
             lines.append(f"{prefix}{c['text'][:200]}")
         return '\n'.join(lines)
