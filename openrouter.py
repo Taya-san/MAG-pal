@@ -5,8 +5,8 @@ This module communicates with OpenRouter, which is an API gateway that
 provides access to many LLMs (DeepSeek, Llama, GPT, Claude, etc.) through
 a single OpenAI-compatible API. We use the openai Python library.
 
-OpenRouter's free tier has rate limits (20 req/min, 50 req/day) but is
-good for testing. Paid tier removes these limits.
+OpenRouter's free tier has rate limits (check https://openrouter.ai/docs/limits
+for current limits) but is good for testing. Paid tier removes these limits.
 
 Two interfaces provided:
 1. Synchronous call() for simple request/response (summarization).

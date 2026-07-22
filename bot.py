@@ -49,9 +49,12 @@ class PalBot(discord.Client):
         # "I want to receive these types of events." If you don't list
         # an intent, Discord simply won't send you those events.
         #
-        # discord.Intents.default() returns a pre-set object with most
-        # common intents already enabled: guilds, messages, reactions,
-        # members list, etc. It's the recommended starting point.
+        # discord.Intents.default() returns a pre-set object with common
+        # intents enabled: guilds, messages, reactions, voice, etc.
+        # Three intents are NOT enabled by default:
+        #   - message_content: PRIVILEGED — manually enabled below
+        #   - members: required for member join/leave events
+        #   - presences: required for online status events
         intents = discord.Intents.default()
         
         # intents.message_content = True enables the MESSAGE CONTENT intent.
@@ -63,9 +66,13 @@ class PalBot(discord.Client):
         # This is a privacy measure by Discord.
         intents.message_content = True
         
-        # super().__init__(intents=intents) passes our intents configuration
-        # to discord.Client's constructor. This is what actually tells
-        # Discord's API "here are the events I want to receive."
+        # super().__init__(intents=intents) calls discord.Client's constructor
+        # and passes our intents config to it. discord.Client stores these
+        # intents internally and sends them to Discord during the WebSocket
+        # handshake, saying "I want to receive these event types."
+        #
+        # This is NOT overwriting — it's the FIRST setup of the parent class.
+        # Without super().__init__(), PalBot would have no connection to Discord.
         super().__init__(intents=intents)
         
         # self.config stores the bot's configuration (loaded from .env).
