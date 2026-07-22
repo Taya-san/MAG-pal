@@ -1,5 +1,5 @@
 # bot.py
-# THE HEART — Discord client, event handlers, commands, and background tasks.
+# THE HEART - Discord client, event handlers, commands, and background tasks.
 #
 # This is where the main loop lives: on_message receives Discord events,
 # gates them (only you, no bots, no duplicates), stores data in the
@@ -40,7 +40,7 @@ class PalBot(discord.Client):
         # === DISCORD INTENTS ===
         # Intents control what events Discord sends us.
         # Intents.default() gives us: guilds, messages, reactions, etc.
-        # message_content is PRIVILEGED — must be enabled in Discord
+        # message_content is PRIVILEGED - must be enabled in Discord
         # Developer Portal > Bot > Message Content Intent.
         intents = discord.Intents.default()
         intents.message_content = True
@@ -100,14 +100,14 @@ class PalBot(discord.Client):
     # ---- LIFECYCLE HOOKS ----
 
     async def setup_hook(self):
-        # Called by discord.py after login but before on_ready.
+        """Initialize async resources: connect DB, start background tasks."""
         # This is where we set up things that need async.
         # Database connection and background tasks go here.
         await self.db.connect()
         self.keyword_decay_loop.start()
 
     async def close(self):
-        # Called when the bot shuts down.
+        """Ordered shutdown: cancel tasks, close DB, close AI client, disconnect Discord."""
         # Order matters:
         # 1. Cancel the background task (so it doesn't fire during shutdown)
         # 2. Close the database connection
@@ -119,7 +119,7 @@ class PalBot(discord.Client):
         await super().close()
 
     async def on_ready(self):
-        # Fires once when the bot connects to Discord.
+        """Log connection info when the bot connects to Discord."""
         # Logs connection info so you can verify it's working.
         logger.info(f"Bot online as {self.user} (ID: {self.user.id})")
         logger.info(f"Owner ID: {self.config.OWNER_ID}")
@@ -129,7 +129,7 @@ class PalBot(discord.Client):
     # ---- MAIN MESSAGE HANDLER ----
 
     async def on_message(self, message):
-        # THE ENTRY POINT — called once for every message the bot can see.
+        """Main message handler - gates, commands, or AI processing background task."""
         # This runs in the Discord gateway event loop, so it must be FAST.
         # All heavy work (AI calls) is spawned as background tasks.
 
@@ -160,7 +160,7 @@ class PalBot(discord.Client):
             await self._route_command(message)
             return
 
-        # === IT'S A CHAT MESSAGE — PROCESS IT ===
+        # === IT'S A CHAT MESSAGE - PROCESS IT ===
 
         self.stats["messages_processed"] += 1
 
@@ -190,6 +190,7 @@ class PalBot(discord.Client):
     # ---- COMMAND ROUTING ----
 
     async def _route_command(self, message):
+        """Dispatch !commands to handlers via commands.HANDLERS dict lookup."""
         parts = message.content.strip().split(maxsplit=1)
         cmd = parts[0].lower()
         args = parts[1] if len(parts) > 1 else ""
@@ -212,7 +213,7 @@ class PalBot(discord.Client):
     # ---- CHANNEL DATA CLEANUP ----
 
     def _cleanup_channel_data(self):
-        # Prevents unbounded memory growth in per-channel dicts.
+        """Evict oldest channel data when per-channel dicts exceed MAX_CHANNEL_DATA."""
         # If the bot is in many channels across many servers,
         # these dicts could grow without limit. This removes
         # the oldest entries when we exceed _MAX_CHANNEL_DATA.
@@ -231,7 +232,7 @@ class PalBot(discord.Client):
 
     async def _process_ai_message(self, message):
         # Runs as a background task for every chat message.
-        # Do NOT call this directly — use asyncio.create_task().
+        # Do NOT call this directly - use asyncio.create_task().
         #
         # Pipeline:
         #   1. Cleanup old channel data
@@ -241,7 +242,7 @@ class PalBot(discord.Client):
         #   5. Call OpenRouter (openrouter.call)
         #   6. Parse and handle response
 
-        self._cleanup_channel_data()
+        """AI processing pipeline: heuristic -> prompt -> API -> parse -> respond."""
 
         # Safety check: if bot isn't fully ready, skip
         if self.user is None:
@@ -253,7 +254,7 @@ class PalBot(discord.Client):
 
         # === AI PROCESSING (errors caught separately) ===
         try:
-            # Acquire semaphore — limits concurrent AI calls to 10
+            # Acquire semaphore - limits concurrent AI calls to 10
             async with self._ai_semaphore:
 
                 # === STEP 1: HEURISTIC EVALUATION ===
@@ -261,7 +262,7 @@ class PalBot(discord.Client):
                     message, self.user, self.last_response_times
                 )
 
-                # SKIP: noise/greeting — do nothing
+                # SKIP: noise/greeting - do nothing
                 if result == HeuristicResult.SKIP:
                     self.stats["heuristic_skip"] += 1
                     if self.debug_mode:
@@ -442,7 +443,7 @@ class PalBot(discord.Client):
             intervention.reset_buffer()
 
     async def _check_summarization(self, channel_id: str):
-        # Checks if it's time to summarize this channel's conversation.
+        """Trigger AI summarization when message count hits SUMMARY_INTERVAL."""
         # Triggered every SUMMARY_INTERVAL non-SKIP messages.
         # Uses a per-channel lock so only one summarization per channel
         # can run at a time.
@@ -460,7 +461,7 @@ class PalBot(discord.Client):
                 session = await self.db.get_or_create_session(channel_id)
                 count = session["message_count"]
 
-                # Re-check inside the lock — another task might have
+                # Re-check inside the lock - another task might have
                 # already summarized at this boundary.
                 if count <= 0 or count % self.config.SUMMARY_INTERVAL != 0:
                     return
@@ -524,7 +525,7 @@ class PalBot(discord.Client):
 
     @keyword_decay_loop.before_loop
     async def before_decay(self):
-        # This runs before the first iteration of the decay loop.
+        """Wait until ready before first keyword decay iteration."""
         # We wait until the bot is connected to Discord and the
         # database is ready before scheduling the first decay.
         await self.wait_until_ready()

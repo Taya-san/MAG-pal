@@ -1,3 +1,10 @@
+"""
+Hierarchical memory store — SQLite-backed block/sentence storage with LDA classification.
+
+Parses markdown text into hierarchical blocks (paragraph, code, table, list, equation)
+via BlockParser, classifies sentences with LDA, and propagates keywords for retrieval.
+Used by StreamIntervention for mid-reasoning memory injection.
+"""
 import json
 import pickle
 import re
@@ -19,7 +26,14 @@ from text_utils import (
 
 
 class MemoryStore:
+    """SQLite-backed memory with blocks, sentences, and hierarchical relations.
+
+    Stores parsed AI responses as block trees (parent paragraph -> child code/table).
+    Provides keyword indexing, owner_id filtering, and LDA classification.
+    """
+
     def __init__(self, db_path=None, lda_path=None):
+        self.db_path = db_path or str(Path(__file__).parent / 'memory.db')
         self.db_path = db_path or str(Path(__file__).parent / "memory.db")
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
@@ -30,6 +44,7 @@ class MemoryStore:
         self._create_tables()
 
     def _create_tables(self):
+        '''Create SQLite tables for blocks, sentences, block_relations. Always safe to call (IF NOT EXISTS).'''
         cur = self.conn.cursor()
         cur.executescript("""
             CREATE TABLE IF NOT EXISTS blocks (
@@ -153,6 +168,7 @@ class MemoryStore:
         return cur.lastrowid
 
     def add_relation(self, parent_id, child_id, relation_type='child_of'):
+        '''Create a block_relations link between parent and child blocks.'''
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO block_relations (parent_id, child_id, relation_type) VALUES (?, ?, ?)",
@@ -164,11 +180,13 @@ class MemoryStore:
     # ===== QUERY =====
 
     def get_block(self, block_id):
+        '''Fetch a single block by ID.'''
         cur = self.conn.cursor()
         cur.execute("SELECT * FROM blocks WHERE id = ?", (block_id,))
         return cur.fetchone()
 
     def get_block_children(self, block_id):
+        '''Fetch all child blocks for a parent.'''
         cur = self.conn.cursor()
         cur.execute("""
             SELECT b.* FROM blocks b
@@ -179,6 +197,7 @@ class MemoryStore:
         return cur.fetchall()
 
     def get_sentences_by_block(self, block_id):
+        '''Fetch all sentences in a block, ordered by line_number.'''
         cur = self.conn.cursor()
         cur.execute(
             "SELECT * FROM sentences WHERE block_id = ? ORDER BY line_number",
@@ -187,6 +206,7 @@ class MemoryStore:
         return cur.fetchall()
 
     def get_tree(self, block_id=None):
+        '''Fetch root blocks (or a single block) with nested children.'''
         cur = self.conn.cursor()
         if block_id is None:
             cur.execute("SELECT * FROM blocks WHERE parent_id IS NULL ORDER BY id")
@@ -282,10 +302,12 @@ class MemoryStore:
         return node
 
     def load_lda(self, lda_path):
+        '''Load a pre-trained LDA classifier from a pickle file.'''
         with open(lda_path, 'rb') as f:
             self.lda = pickle.load(f)
 
     def count_stats(self):
+        '''Return dict of {sentences, blocks, flagged, relations} counts.'''
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) FROM sentences")
         s = cur.fetchone()[0]
@@ -298,10 +320,17 @@ class MemoryStore:
         return {'sentences': s, 'blocks': b, 'flagged': fl, 'relations': r}
 
     def close(self):
+        '''Close the database connection.'''
         self.conn.close()
 
 
 class BlockParser:
+    """Line-by-line markdown parser that stores hierarchical blocks into MemoryStore.
+
+    Detects code blocks (```), equations ($$), tables (|...|), list items (#. / -),
+    and paragraphs. Propagates parent keywords to children and runs LDA classification.
+    """
+
     def __init__(self, memory_store, embed_fn=None):
         self.store = memory_store
         self.embed = embed_fn
@@ -481,6 +510,7 @@ class BlockParser:
         return all_block_ids, all_sentence_ids
 
     def _propagate_top_words(self):
+        '''Merge parent keywords into children. Seed structural type names for code/table/equation blocks.'''
         """Propagate parent keywords to children: bare ref injection, merge, type seeding."""
         cur = self.store.conn.cursor()
         cur.execute("""
@@ -529,6 +559,8 @@ class BlockParser:
         self.store.conn.commit()
 
     def _classify_sentences(self, sentence_ids):
+        '''Score each sentence with LDA: embeds -> decision_function -> label='flagged' or 'unlabeled'.'''
+        '''Run LDA classifier on each sentence. Code lines, equations, and table rows inherit parent labels.'''
         cur = self.store.conn.cursor()
         for sid in sentence_ids:
             cur.execute("""
