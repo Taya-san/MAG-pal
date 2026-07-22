@@ -1,15 +1,13 @@
 # bot.py
-# THE HEART - Discord client, event handlers, commands, and background tasks.
-#
-# This is where the main loop lives: on_message receives Discord events,
-# gates them (only you, no bots, no duplicates), stores data in the
-# database, spawns AI processing in background tasks, and routes commands.
-#
-# Architecture:
-#   on_message() → synchronous gates (microseconds) → command or spawn AI task
-#   _process_ai_message() → heuristic → prompt → OpenRouter → response
-#   _route_command() → dict dispatch to handler methods
-#   keyword_decay_loop() → background task every 6 hours
+"""Discord client — message gating, AI processing, streaming intervention loop.
+
+This is the main orchestrator. on_message() receives Discord events,
+gates them (owner-only, no bots, no duplicates), stores data, and
+spawns AI processing as background tasks. Commands are handled by
+commands.py. The AI pipeline (heuristic -> prompt -> API -> response)
+lives in _process_ai_message(). Multi-intervention streaming lives
+in _stream_with_intervention().
+"""
 
 import asyncio
 import logging
@@ -231,6 +229,7 @@ class PalBot(discord.Client):
     # ---- AI MESSAGE PROCESSING (BACKGROUND TASK) ----
 
     async def _process_ai_message(self, message):
+        """AI processing pipeline: heuristic -> prompt -> API -> parse -> respond."""
         # Runs as a background task for every chat message.
         # Do NOT call this directly - use asyncio.create_task().
         #
@@ -241,8 +240,6 @@ class PalBot(discord.Client):
         #   4. Build prompt (responder.build_prompt)
         #   5. Call OpenRouter (openrouter.call)
         #   6. Parse and handle response
-
-        """AI processing pipeline: heuristic -> prompt -> API -> parse -> respond."""
 
         # Safety check: if bot isn't fully ready, skip
         if self.user is None:
@@ -512,7 +509,12 @@ class PalBot(discord.Client):
                 f"Summarization failed for {channel_id}: {e}",
                 exc_info=True,
             )
-        # - Logs and continues on error
+
+    # ---- BACKGROUND TASKS ----
+
+    @tasks.loop(hours=6)
+    async def keyword_decay_loop(self):
+        """Decrease frequency of stale keywords every 6 hours."""
         try:
             logger.info("Running keyword decay...")
             await self.db.decay_keywords(days=7)
