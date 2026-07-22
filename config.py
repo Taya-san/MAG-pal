@@ -85,6 +85,16 @@ class Config:
             os.getenv("HEURISTIC_CONTINUATION_MINUTES", "2")
         )
 
+        raw_names = os.getenv("OWNER_NAMES", "")
+        self.OWNER_NAMES = {}
+        if raw_names:
+            for pair in raw_names.split(","):
+                pair = pair.strip()
+                if ":" in pair:
+                    uid, name = pair.split(":", 1)
+                    self.OWNER_NAMES[int(uid.strip())] = name.strip()
+        self.NAME_TO_OWNER = {v: k for k, v in self.OWNER_NAMES.items()}
+
     def validate(self):
         # Called at startup. If required config is missing,
         # raises ValueError with a clear message.

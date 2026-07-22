@@ -3,6 +3,50 @@ from stopwords import STOPWORDS
 import re
 
 
+OBJECT_TYPE_KEYWORDS = {
+    'table':    ['row', 'column', 'data', 'value', 'comparison', 'entry', 'feature', 'property'],
+    'code':     ['code', 'function', 'class', 'implementation', 'example', 'syntax', 'program'],
+    'list':     ['step', 'item', 'point', 'example', 'property', 'key'],
+    'equation': ['formula', 'expression', 'variable', 'function', 'symbol', 'math'],
+}
+
+MIN_WORDS_FOR_RICH = 3
+
+
+def merge_top_words(parent_words, child_words, max_words=12):
+    seen = set(parent_words)
+    merged = list(parent_words)
+    for w in child_words:
+        if w not in seen:
+            seen.add(w)
+            merged.append(w)
+    return merged[:max_words]
+
+
+def detect_bare_reference(top_words):
+    return len(top_words) < MIN_WORDS_FOR_RICH
+
+
+def inject_type_keywords(top_words, child_types, max_words=5):
+    seen = set(top_words)
+    result = list(top_words)
+    for ctype in child_types:
+        for kw in OBJECT_TYPE_KEYWORDS.get(ctype, []):
+            if kw not in seen:
+                seen.add(kw)
+                result.append(kw)
+    return result[:max_words]
+
+
+def filter_injected_keywords(words):
+    """Remove generic structural keywords (function, example, row, column, etc.)
+    from a word list, keeping only content-bearing topical keywords."""
+    injected = set()
+    for kws in OBJECT_TYPE_KEYWORDS.values():
+        injected.update(kws)
+    return [w for w in words if w not in injected]
+
+
 def extract_top_words(text, content_type='paragraph', max_words=5):
     if content_type == 'table':
         return _extract_table_top_words(text, max_words)

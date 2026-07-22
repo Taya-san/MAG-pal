@@ -87,6 +87,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_keywords_freq
                 ON keywords(frequency DESC);
             -- ^ Speeds up: "give me the top 10 most frequent keywords"
+
+            CREATE TABLE IF NOT EXISTS user_aliases (
+                id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                resolves_to INTEGER NOT NULL,
+                UNIQUE(owner_id, alias)
+            );
+            -- ^ Per-user private nickname mappings.
+            --   owner_id = who OWNS this alias entry
+            --   alias = what they call this person ("bintang")
+            --   resolves_to = target owner_id — whose data to pull
         """)
         await self.conn.commit()
 
@@ -238,11 +250,42 @@ class Database:
         await self.commit()
 
     async def get_message_count(self):
-        # Returns total number of stored messages across all channels.
-        # Used by !stats.
         cursor = await self.conn.execute("SELECT COUNT(*) FROM messages")
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+    async def add_alias(self, owner_id: int, alias: str, resolves_to: int):
+        """Add a private nickname mapping. owner_id=who owns it, resolves_to=who it refers to."""
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO user_aliases (owner_id, alias, resolves_to) VALUES (?, ?, ?)",
+            (owner_id, alias.lower().strip(), resolves_to),
+        )
+        await self.commit()
+
+    async def remove_alias(self, owner_id: int, alias: str):
+        """Remove a nickname from the owner's private alias table."""
+        await self.conn.execute(
+            "DELETE FROM user_aliases WHERE owner_id = ? AND alias = ?",
+            (owner_id, alias.lower().strip()),
+        )
+        await self.commit()
+
+    async def resolve_alias(self, owner_id: int, alias: str) -> int | None:
+        """Look up who a nickname resolves to. Returns target owner_id or None."""
+        cursor = await self.conn.execute(
+            "SELECT resolves_to FROM user_aliases WHERE owner_id = ? AND alias = ?",
+            (owner_id, alias.lower().strip()),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def get_aliases(self, owner_id: int):
+        """Return all alias mappings for an owner as list of {alias, resolves_to}."""
+        cursor = await self.conn.execute(
+            "SELECT alias, resolves_to FROM user_aliases WHERE owner_id = ?",
+            (owner_id,),
+        )
+        return await cursor.fetchall()
 
     async def clear_messages(self):
         # Deletes ALL messages and resets all session data.

@@ -25,6 +25,8 @@ from db import Database
 from keywords import extract_keywords
 from openrouter import OpenRouterClient
 from responder import Responder, HeuristicResult
+from memory_store import MemoryStore
+from stream_intervention import StreamIntervention
 
 logger = logging.getLogger("palbot")
 
@@ -46,11 +48,11 @@ class PalBot(discord.Client):
         self.config = config
 
         # === DEPENDENCIES ===
-        # These are created here and passed to wherever they're needed.
-        # This is called "dependency injection" — makes testing easier.
         self.db = Database(config.DB_PATH)
         self.openrouter = OpenRouterClient(config)
-        self.responder = Responder(config, self.db, self.openrouter)
+        self.memory_store = MemoryStore()
+        self.responder = Responder(config, self.db, self.openrouter, self.memory_store)
+        self.stream_intervention = StreamIntervention(self.memory_store)
 
         # === STATE ===
 
@@ -209,6 +211,7 @@ class PalBot(discord.Client):
             "!showprompt": self._cmd_showprompt,
             "!stats": self._cmd_stats,
             "!clear": self._cmd_clear,
+            "!alias": self._cmd_alias,
             "!help": self._cmd_help,
         }
 
@@ -321,10 +324,17 @@ class PalBot(discord.Client):
                         )
 
                 # === STEP 3: CALL OPENROUTER ===
-                async with message.channel.typing():
-                    response_text, usage = await asyncio.to_thread(
-                        self.openrouter.call, prompt
+                use_streaming = bool(self.stream_intervention.keyword_index)
+
+                if use_streaming:
+                    response_text, usage = await self._stream_with_intervention(
+                        message, prompt
                     )
+                else:
+                    async with message.channel.typing():
+                        response_text, usage = await asyncio.to_thread(
+                            self.openrouter.call, prompt
+                        )
 
                 # Update stats
                 self.stats["ai_calls"] += 1
@@ -389,6 +399,75 @@ class PalBot(discord.Client):
         # should still check even if the AI call errored out.
         if should_summarise and self.config.SUMMARIZE:
             await self._check_summarization(str(message.channel.id))
+
+    async def _stream_with_intervention(self, message, prompt):
+        """Stream with multi-intervention loop: scan reasoning tokens, inject memory on match.
+
+        Creates a per-call StreamIntervention with shared keyword_index for isolation.
+        Uses a while-True loop: on intervention, builds a continuation prompt and
+        restarts the stream with enriched context. Loop continues until a stream
+        completes without any intervention firing."""
+        intervention = StreamIntervention(
+            memory_store=self.memory_store,
+            shared_index=self.stream_intervention.keyword_index,
+            owner_id=self.config.OWNER_ID,
+        )
+        partial_reasoning = []
+        output_tokens = []
+        start = time.time()
+
+        current_prompt = prompt
+        try:
+            async with message.channel.typing():
+                while True:
+                    interrupted = False
+                    async for token, phase in self.openrouter.stream_with_reasoning(current_prompt):
+                        if phase == 'reasoning':
+                            partial_reasoning.append(token)
+                            intervention.decrement_cooldowns(1)
+
+                            for completed in intervention.buffer_token(token):
+                                match = intervention.check_match(
+                                    completed,
+                                    partial_reasoning[-400:],
+                                )
+                                if match:
+                                    current_prompt = self.responder.build_continuation_prompt(
+                                        current_prompt,
+                                        ''.join(partial_reasoning),
+                                        match['context'],
+                                    )
+                                    intervention.reset_buffer()
+                                    interrupted = True
+                                    break
+                            if interrupted:
+                                break
+                        elif phase == 'output':
+                            output_tokens.append(token)
+                    if not interrupted:
+                        break
+
+            for word in intervention.flush_buffer():
+                match = intervention.check_match(word, partial_reasoning[-400:])
+                if match:
+                    current_prompt = self.responder.build_continuation_prompt(
+                        current_prompt,
+                        ''.join(partial_reasoning),
+                        match['context'],
+                    )
+                    async for token, phase in self.openrouter.stream_with_reasoning(current_prompt):
+                        if phase == 'reasoning':
+                            partial_reasoning.append(token)
+                        else:
+                            output_tokens.append(token)
+
+            latency = time.time() - start
+            full_output = ''.join(output_tokens)
+
+            intervention.apply_output_decay(len(full_output.split()))
+            return full_output, {"latency": round(latency, 2)}
+        finally:
+            intervention.reset_buffer()
 
     async def _check_summarization(self, channel_id: str):
         # Checks if it's time to summarize this channel's conversation.
@@ -580,9 +659,6 @@ class PalBot(discord.Client):
         await message.channel.send(text)
 
     async def _cmd_clear(self, message, args):
-        # Destructive: deletes ALL message history from the database.
-        # Requires confirmation (!clear confirm) to prevent accidents.
-        # This is irreversible — the database is permanently deleted.
         if args.strip().lower() != "confirm":
             await message.channel.send(
                 "\u26a0\ufe0f This will delete ALL message history "
@@ -593,6 +669,87 @@ class PalBot(discord.Client):
         await self.db.clear_messages()
         await message.channel.send("Cleared all message history.")
         await message.add_reaction("\u2705")
+
+    async def _cmd_alias(self, message, args):
+        """Manage private nickname aliases: !alias add <nick> for <user>, list, remove."""
+        parts = args.strip().split()
+        if not parts:
+            await message.channel.send(
+                "**!alias usage:**\n"
+                "`!alias add <nickname> for <username>` — nick someone\n"
+                "`!alias list` — show your nicknames\n"
+                "`!alias remove <nickname>` — remove a nickname"
+            )
+            return
+
+        sub = parts[0].lower()
+        owner = self.config.OWNER_ID
+
+        if sub == "list":
+            aliases = await self.db.get_aliases(owner)
+            if not aliases:
+                await message.channel.send("You have no aliases set.")
+                return
+            lines = []
+            for row in aliases:
+                res_name = self.config.OWNER_NAMES.get(row["resolves_to"], str(row["resolves_to"]))
+                lines.append(f"  {row['alias']} -> {res_name}")
+            await message.channel.send("**Your aliases:**\n" + "\n".join(lines))
+            return
+
+        if sub == "remove":
+            if len(parts) < 2:
+                await message.channel.send("Usage: `!alias remove <nickname>`")
+                return
+            await self.db.remove_alias(owner, parts[1])
+            await message.channel.send(f"Removed alias '{parts[1].lower()}'")
+            await message.add_reaction("\u2705")
+            return
+
+        if sub == "add":
+            try:
+                for_idx = parts.index("for")
+                nickname = parts[1:for_idx]
+                target_name = parts[for_idx + 1:]
+            except (ValueError, IndexError):
+                await message.channel.send(
+                    "Usage: `!alias add <nickname> for <username>`\n"
+                    "Example: `!alias add bintang for taya`"
+                )
+                return
+
+            nickname = " ".join(nickname).lower().strip()
+            target_name = " ".join(target_name).lower().strip()
+
+            if not nickname or not target_name:
+                await message.channel.send("Both nickname and target name are required.")
+                return
+
+            target_id = self.config.NAME_TO_OWNER.get(target_name)
+            if not target_id:
+                await message.channel.send(
+                    f"Unknown user '{target_name}'. I don't know who that is.\n"
+                    f"Known names: {', '.join(self.config.NAME_TO_OWNER.keys())}"
+                )
+                return
+
+            await self.db.add_alias(owner, nickname, target_id)
+            await message.channel.send(
+                f"Got it! '{nickname}' now refers to {target_name}."
+            )
+            await message.add_reaction("\u2705")
+            return
+
+        await message.channel.send(f"Unknown subcommand '{sub}'. Try `!alias` for help.")
+
+    async def resolve_mention(self, owner_id, text):
+        """Check if any word in the message matches a known alias. Returns target owner_id or None."""
+        words = set(text.lower().split())
+        aliases = await self.db.get_aliases(owner_id)
+        for row in aliases:
+            if row["alias"] in words:
+                return row["resolves_to"]
+        return None
 
     async def _cmd_help(self, message, args):
         # Lists all available commands with brief descriptions.

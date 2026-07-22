@@ -49,13 +49,11 @@ class Responder:
     # The core decision engine.
     # Receives a message, checks heuristics, and returns what to do.
 
-    def __init__(self, config, db, openrouter):
-        # config: the Config object (personality, name, etc.)
-        # db: Database instance (for fetching history & keywords)
-        # openrouter: OpenRouterClient (only used for summarization in future)
+    def __init__(self, config, db, openrouter, memory_store=None):
         self.config = config
         self.db = db
         self.openrouter = openrouter
+        self.memory_store = memory_store
 
     def is_question(self, text: str) -> bool:
         # Three-tier question detection:
@@ -349,6 +347,27 @@ class Responder:
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Conversation:\n{conversation}\n\nSummary:"},
         ]
+
+    def build_continuation_prompt(self, original_prompt, partial_reasoning, injected_context):
+        """Build a re-prompt with injected memory context for mid-stream intervention.
+
+        Preserves the original prompt, appends partial reasoning as an assistant
+        message (what the AI was thinking), and adds the injected memory block as
+        a system message instructing the AI to incorporate it and continue."""
+        prompt = list(original_prompt)
+        prompt.append({
+            "role": "assistant",
+            "content": partial_reasoning,
+        })
+        prompt.append({
+            "role": "system",
+            "content": (
+                "[New information to incorporate in your reasoning:\n"
+                f"{injected_context}\n]\n"
+                "Continue your reasoning naturally, incorporating this information."
+            ),
+        })
+        return prompt
 
     def parse_response(self, response_text: str) -> tuple[bool, str]:
         # Parses the AI's response to check for <SILENT>.
