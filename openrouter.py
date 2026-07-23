@@ -91,8 +91,9 @@ class OpenRouterClient:
         self.reasoning_tag_close = getattr(config, 'REASONING_TAG_CLOSE', '</think>')
 
     def close(self):
-        """Clean up the HTTP client's connection pool on shutdown."""
+        """Clean up both HTTP client's connection pool on shutdown."""
         self.client.close()
+        self.async_client.close()
 
     # ===== SYNCHRONOUS CALL =====
     # Used for summarization. Runs in a thread pool via asyncio.to_thread.
@@ -228,15 +229,12 @@ class OpenRouterClient:
             raise
 
         # State machine flags for reasoning detection:
-        in_reasoning = False     # currently inside a reasoning block
-        saw_reasoning = False    # latch — reasoning ever detected in this stream?
+        in_reasoning = False          # currently inside a reasoning block
+        reasoning_by_field = False    # was in_reasoning set by reasoning_content/reasoning field?
 
         # Second: iterate over the stream chunks.
-        # Each chunk is a ChatCompletionChunk object with:
-        #   chunk.choices[0].delta (the token data)
         try:
             async for chunk in stream:
-                # Guard: some chunks have empty choices (keep-alive signals)
                 if not chunk.choices:
                     continue
                     
@@ -244,14 +242,16 @@ class OpenRouterClient:
                 if not delta:
                     continue
 
-                # --- Method 1: reasoning_content field ---
-                # Some models (DeepSeek via API) emit a separate field
-                # for reasoning tokens vs output tokens.
-                # reasoning_content appears ONLY during reasoning phase.
-                reasoning = getattr(delta, 'reasoning_content', None)
+                # --- Method 1: 'reasoning' (OpenRouter) or 'reasoning_content' field ---
+                # These models emit a separate delta field for reasoning tokens.
+                # When the field stops appearing, reasoning has ended.
+                reasoning = (
+                    getattr(delta, 'reasoning', None)
+                    or getattr(delta, 'reasoning_content', None)
+                )
                 if reasoning:
                     in_reasoning = True
-                    saw_reasoning = True       # latch on permanently
+                    reasoning_by_field = True  # track method for transition detection
                     yield reasoning, 'reasoning'
                     continue
 
@@ -259,15 +259,14 @@ class OpenRouterClient:
                 if not content:
                     continue
 
-                # --- Reasoning→output transition for Method 1 models ---
-                # When saw_reasoning is True AND we just got content
-                # WITHOUT reasoning_content, the model switched to output.
-                # The "real reasoning" is done.
-                if saw_reasoning and in_reasoning:
+                # Reasoning→output transition (only for Method 1 models).
+                # Only fires when in_reasoning was set by reasoning_content/reasoning field,
+                # not by tags — tag models manage their own state via open/close tags.
+                if reasoning_by_field and in_reasoning:
                     in_reasoning = False
+                    reasoning_by_field = False
 
                 # --- Method 2: Tag-based reasoning detection ---
-                # For models that use <think> tags in the content itself.
                 tag_open = self.reasoning_tag_open
                 tag_close = self.reasoning_tag_close
 
