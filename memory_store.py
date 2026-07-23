@@ -23,7 +23,11 @@ from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
+# Docs: https://numpy.org/doc/
 from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
+# Docs: https://github.com/cjhutto/vaderSentiment
+#        https://docs.python.org/3/library/sqlite3.html
+#        https://scikit-learn.org/stable/modules/generated/sklearn.discriminant_analysis.LinearDiscriminantAnalysis.html
 
 from text_utils import (
     extract_top_words,

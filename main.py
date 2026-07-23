@@ -41,7 +41,7 @@ def setup_logging(debug: bool):
 
 def main():
     # 1. Load .env into os.environ
-    from dotenv import load_dotenv
+    from dotenv import load_dotenv  # Docs: https://github.com/theskumar/python-dotenv
     load_dotenv()
 
     # 2. Load and validate config

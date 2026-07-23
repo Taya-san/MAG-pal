@@ -11,6 +11,9 @@
 # This prevents SQL injection attacks.
 
 import aiosqlite
+# Docs: https://aiosqlite.omnilib.dev/
+#        https://docs.python.org/3/library/datetime.html
+
 from datetime import datetime, timedelta, timezone
 
 

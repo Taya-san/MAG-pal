@@ -20,6 +20,8 @@ We maintain TWO client instances because:
 import time
 import logging
 from openai import AsyncOpenAI, OpenAI, APIError, RateLimitError
+# Docs: https://platform.openai.com/docs/api-reference
+#        https://openrouter.ai/docs/api-reference
 
 logger = logging.getLogger("palbot")
 

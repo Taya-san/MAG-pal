@@ -51,6 +51,19 @@ python main.py
 | `text_utils.py` | Shared text utilities — `extract_top_words()`, `filter_injected_keywords()`, `merge_top_words()`, table keyword extraction |
 | `tree_parser.py` | Standalone parse tree (Node + TreeParser) for response structure visualization |
 
+## Libraries
+
+| Library | Docs | Used in |
+|---------|------|---------|
+| [discord.py](https://discordpy.readthedocs.io/) | Discord client, intents, message events | `bot.py` |
+| [openai](https://platform.openai.com/docs/api-reference) | Sync + async LLM API client | `openrouter.py` |
+| [aiosqlite](https://aiosqlite.omnilib.dev/) | Async SQLite for event-loop safety | `db.py` |
+| [python-dotenv](https://github.com/theskumar/python-dotenv) | Load .env into os.environ | `config.py`, `main.py` |
+| [numpy](https://numpy.org/doc/) | Array ops for ONNX embedding vectors | `memory_store.py` |
+| [vaderSentiment](https://github.com/cjhutto/vaderSentiment) | Rule-based sentiment scoring | `memory_store.py` |
+| [scikit-learn](https://scikit-learn.org/stable/) | LDA classifier for definitional sentences | `memory_store.py` (via pickle) |
+| [psutil](https://psutil.readthedocs.io/) | RAM/CPU diagnostics | `debug_test.py` |
+
 ## Data Flow: Memory System
 
 ### Storage (when the AI responds)

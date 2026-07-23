@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 
 import discord
 from discord.ext import tasks
+# Docs: https://discordpy.readthedocs.io/en/stable/
+#        https://docs.python.org/3/library/asyncio.html
 
 from config import Config
 from db import Database
