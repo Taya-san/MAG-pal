@@ -24,7 +24,6 @@ from pathlib import Path
 
 import numpy as np
 # Docs: https://numpy.org/doc/
-from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 # Docs: https://github.com/cjhutto/vaderSentiment
 #        https://docs.python.org/3/library/sqlite3.html
 #        https://scikit-learn.org/stable/modules/generated/sklearn.discriminant_analysis.LinearDiscriminantAnalysis.html
@@ -51,7 +50,6 @@ class MemoryStore:
       - text: The raw content
       - type: paragraph/code/table/list/equation
       - top_words: JSON list of extracted keywords
-      - sentiment: VADER sentiment score
       - owner_id: Discord user ID (NULL = public)
     
     Sentences are individual lines/statements within a block.
@@ -66,7 +64,6 @@ class MemoryStore:
         # sqlite3.Row enables column access by name: row['text'] instead of row[0]
         self.conn = sqlite3.connect(self.db_path)
         self.conn.row_factory = sqlite3.Row
-        self.analyzer = SentimentIntensityAnalyzer()
         self.lda = None
         if lda_path:
             self.load_lda(lda_path)
@@ -94,7 +91,6 @@ class MemoryStore:
                 type TEXT NOT NULL DEFAULT 'paragraph',
                 parent_id INTEGER REFERENCES blocks(id),
                 top_words TEXT DEFAULT '[]',
-                sentiment REAL DEFAULT 0.0,
                 owner_id INTEGER,
                 created_at REAL NOT NULL
             );
@@ -183,13 +179,11 @@ class MemoryStore:
             top_words = top_words[:12]  # cap at 12 keywords
         top_words = json.dumps(top_words)
         
-        # VADER sentiment analysis on the block text
-        sentiment = self.analyzer.polarity_scores(text)['compound']
         
         cur = self.conn.cursor()
         cur.execute(
-            "INSERT INTO blocks (text, type, parent_id, top_words, sentiment, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (text.strip(), block_type, parent_id, top_words, sentiment, owner_id, time.time())
+            "INSERT INTO blocks (text, type, parent_id, top_words, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+            (text.strip(), block_type, parent_id, top_words, owner_id, time.time())
         )
         self.conn.commit()
         return cur.lastrowid
@@ -651,9 +645,9 @@ class BlockParser:
                 cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
                 existing = cur.fetchone()[0]
                 new_text = existing + ' ' + stripped
-                cur.execute("UPDATE blocks SET text = ?, top_words = ?, sentiment = ? WHERE id = ?",
+                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
                     (new_text, json.dumps(extract_top_words(new_text)),
-                     self.store.analyzer.polarity_scores(new_text)['compound'], current_block_id))
+                     current_block_id))
                 self.store.conn.commit()
                 last_block_type = 'paragraph'
                 
@@ -665,9 +659,9 @@ class BlockParser:
                 cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
                 existing = cur.fetchone()[0]
                 new_text = existing + ' ' + block_text
-                cur.execute("UPDATE blocks SET text = ?, top_words = ?, sentiment = ? WHERE id = ?",
+                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
                     (new_text, json.dumps(extract_top_words(new_text)),
-                     self.store.analyzer.polarity_scores(new_text)['compound'], current_block_id))
+                     current_block_id))
                 self.store.conn.commit()
                 for ln, s in enumerate(sents):
                     sid = self.store.add_sentence(s, current_block_id, ln, 'sentence',
