@@ -57,7 +57,7 @@ def extract_top_words(text, content_type='paragraph', max_words=5):
     if content_type in ('code', 'equation'):
         return []
 
-    cleaned = re.sub(r'[^a-z\s]', ' ', text.lower())
+    cleaned = re.sub(r'[^\w\s]', ' ', text.lower())
     words = [w for w in cleaned.split() if w not in STOPWORDS and len(w) > 2]
     if not words:
         return []
@@ -144,7 +144,7 @@ def _extract_table_top_words(text, max_words=5):
 
     all_words = []
     for c in candidates:
-        words = re.sub(r'[^a-z\s]', ' ', c).split()
+        words = re.sub(r'[^\w\s]', ' ', c).split()
         all_words.extend([w for w in words if w not in STOPWORDS and len(w) >= 2])
 
     seen = set()

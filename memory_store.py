@@ -35,6 +35,7 @@ from text_utils import (
     inject_type_keywords,
     filter_injected_keywords,
 )
+from stopwords import STOPWORDS
 
 
 class MemoryStore:
@@ -235,12 +236,65 @@ class MemoryStore:
         if existing is not None:
             existing_id, existing_richness = existing
             new_richness = self._block_richness(text, block_type)
-            if new_richness <= existing_richness:
+
+            # For structural blocks (code/eq/table): replace if richer
+            if block_type in ('code', 'equation', 'table'):
+                if new_richness <= existing_richness:
+                    return existing_id
+                cur = self.conn.cursor()
+                cur.execute(
+                    "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
+                    (text.strip(), json.dumps(top_words), time.time(), existing_id)
+                )
+                self.conn.commit()
                 return existing_id
+
+            # For paragraphs/lists: merge new unique sentences instead of replacing
             cur = self.conn.cursor()
+            cur.execute("SELECT text, top_words FROM blocks WHERE id = ?", (existing_id,))
+            old_row = cur.fetchone()
+            if old_row is None:
+                return existing_id
+
+            old_text, old_top_words_json = old_row
+            old_top_words = json.loads(old_top_words_json) if old_top_words_json else []
+
+            sent_splitter = re.compile(r'(?<=[.!?])\s+(?=[A-Z"(\[])')
+            old_sents = [s.strip() for s in sent_splitter.split(old_text) if len(s.strip()) > 3]
+            new_sents = [s.strip() for s in sent_splitter.split(text) if len(s.strip()) > 3]
+
+            added = []
+            for new_sent in new_sents:
+                new_content = set(
+                    w for w in re.sub(r'[^\w\s]', ' ', new_sent.lower()).split()
+                    if w not in STOPWORDS and len(w) > 2
+                )
+                if not new_content:
+                    added.append(new_sent)
+                    continue
+
+                # Check if new sentence has ANY content word not seen
+                # in any existing sentence. If so, it's truly new info
+                # (even if topic words like "gaussian elimination" overlap).
+                all_old_content = set()
+                for old_sent in old_sents:
+                    oc = set(
+                        w for w in re.sub(r'[^\w\s]', ' ', old_sent.lower()).split()
+                        if w not in STOPWORDS and len(w) > 2
+                    )
+                    all_old_content |= oc
+
+                if new_content - all_old_content:
+                    added.append(new_sent)
+
+            if not added:
+                return existing_id
+
+            merged_text = old_text + ' ' + ' '.join(added)
+            merged_top_words = list(dict.fromkeys(old_top_words + top_words))[:12]
             cur.execute(
                 "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
-                (text.strip(), json.dumps(top_words), time.time(), existing_id)
+                (merged_text.strip(), json.dumps(merged_top_words), time.time(), existing_id)
             )
             self.conn.commit()
             return existing_id
