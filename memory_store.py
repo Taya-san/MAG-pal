@@ -143,43 +143,110 @@ class MemoryStore:
     # ===== INSERT METHODS =====
     # These create new blocks, sentences, and relations in the database.
 
+    def _block_richness(self, text, block_type):
+        """Estimate how information-rich a block's text is."""
+        if block_type == 'code':
+            return len(text.split('\n'))
+        return len(text.split())
+
+    def find_similar_block(self, text, block_type, owner_id, threshold=0.5):
+        """
+        Check if a similar block already exists, comparing by keyword overlap.
+        
+        Uses Jaccard similarity on top_words (ignoring structural type names).
+        Returns (existing_id, richness_score) if a match is found, else None.
+        
+        This is a simple dedup — refine later with embeddings or LLM-based
+        comparison for better semantic matching.
+        """
+        new_words = set(
+            w for w in extract_top_words(text, content_type=block_type)
+            if w not in ('code', 'equation', 'table', 'list')
+        )
+        if not new_words:
+            # Fallback to exact text match for blocks with no meaningful keywords
+            # (e.g. code, equations where extract_top_words returns []).
+            cur = self.conn.cursor()
+            cur.execute(
+                "SELECT id, text FROM blocks "
+                "WHERE type = ? AND text = ? AND (owner_id IS NULL OR owner_id = ?)",
+                (block_type, text.strip(), owner_id,)
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return (row[0], self._block_richness(row[1], block_type))
+            return None
+
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT id, text, top_words FROM blocks "
+            "WHERE type = ? AND (owner_id IS NULL OR owner_id = ?) "
+            "ORDER BY id DESC",
+            (block_type, owner_id,)
+        )
+
+        best = None
+        best_score = threshold
+
+        for row in cur.fetchall():
+            try:
+                existing_words = set(json.loads(row[2]))
+            except Exception:
+                continue
+            existing_words -= {'code', 'equation', 'table', 'list'}
+            if not existing_words:
+                continue
+
+            intersection = new_words & existing_words
+            # Use similarity weighted toward recall: fraction of MIN set
+            # that overlaps. This handles "poor text → richer text" well.
+            score = len(intersection) / min(len(new_words), len(existing_words)) if min(new_words, existing_words) else 0
+
+            if score >= best_score:
+                best_score = score
+                best = (row[0], self._block_richness(row[1], block_type))
+
+        return best
+
     def add_block(self, text, block_type='paragraph', parent_id=None, owner_id=None):
         """
-        Insert a new block into the database.
+        Insert a new block into the database, with dedup.
         
-        A block represents a structural unit: a paragraph, a code block,
-        a table, a list, or an equation. Each block gets:
-          - auto-generated ID (sqlite AUTOINCREMENT)
-          - top_words extracted from its text
-          - sentiment scored by VADER
-          - owner_id for privacy filtering
+        Before inserting, checks if a similar block already exists (by keyword overlap).
+        If a similar block exists and is equally or more information-rich, skips
+        creation and returns the existing block's id. If the new block is richer,
+        updates the existing block in-place.
         
-        Structural Type Seeding:
-          For code/table/list/equation blocks, the type name is appended
-          to top_words. This is necessary because a code block's text
-          (like "x = 1\n") doesn't contain the word "code" — but we want
-          "code" to be a searchable keyword so the intervention system can
-          match when the AI says "the code looks like...".
+        NOTE: When returning an existing block id, the caller will still add
+        sentences to it. This means duplicate sentence rows may accumulate.
+        This is acceptable for the initial version but should be refined.
         
-        Args:
-            text: Block content (markdown text).
-            block_type: 'paragraph', 'code', 'table', 'list', 'equation'.
-            parent_id: FK to parent block (None = root block).
-            owner_id: Discord user ID (None = public, visible to all).
-        
-        Returns:
-            Auto-increment ID of the new block.
+        ... (rest of docstring)
         """
         top_words = extract_top_words(text, content_type=block_type)
-        
+
         # Seed structural type name for retrieval
         structural_types = {'code', 'table', 'list', 'equation'}
         if block_type in structural_types and block_type not in top_words:
             top_words.append(block_type)
-            top_words = top_words[:12]  # cap at 12 keywords
+
+        # Dedup: skip if similar block exists and is same or richer
+        existing = self.find_similar_block(text, block_type, owner_id)
+        if existing is not None:
+            existing_id, existing_richness = existing
+            new_richness = self._block_richness(text, block_type)
+            if new_richness <= existing_richness:
+                return existing_id
+            cur = self.conn.cursor()
+            cur.execute(
+                "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
+                (text.strip(), json.dumps(top_words), time.time(), existing_id)
+            )
+            self.conn.commit()
+            return existing_id
+
         top_words = json.dumps(top_words)
-        
-        
+
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO blocks (text, type, parent_id, top_words, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -495,6 +562,7 @@ class BlockParser:
         i = 0
         current_block_id = None   # active block being built
         last_block_type = None     # type of the last closed block
+        last_structural_parent_id = None  # paragraph that was parent before a structural block
         
         while i < len(lines):
             stripped = lines[i].strip()
@@ -533,6 +601,7 @@ class BlockParser:
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
+                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
                 current_block_id = None
                 last_block_type = 'code'
                 continue
@@ -561,6 +630,7 @@ class BlockParser:
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
+                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
                 current_block_id = None
                 last_block_type = 'equation'
                 continue
@@ -610,6 +680,7 @@ class BlockParser:
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
+                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
                 current_block_id = None
                 last_block_type = 'table'
                 continue
@@ -678,7 +749,34 @@ class BlockParser:
                         # This keeps punctuation attached to the first sentence.
                 
                 block_text = ' '.join(sents)
-                block_id = self.store.add_block(block_text, 'paragraph', None, owner_id)
+                
+                # Peek-ahead: if next non-blank line is a paragraph (not structural),
+                # this is the start of a multi-line topic → new root.
+                # Otherwise it's a single-line continuation → same tree.
+                is_multi = False
+                if last_structural_parent_id is not None:
+                    peep = i + 1
+                    while peep < len(lines) and not lines[peep].strip():
+                        peep += 1
+                    is_multi = (
+                        peep < len(lines)
+                        and lines[peep].strip()
+                        and not lines[peep].strip().startswith('$$')
+                        and not lines[peep].strip().startswith('```')
+                        and not re.match(r'^\s*(?:\d+[\.\)]|[-*])\s', lines[peep].strip())
+                        and not (lines[peep].strip().startswith('|') and lines[peep].strip().endswith('|'))
+                    )
+                
+                if last_structural_parent_id is not None and not is_multi:
+                    # Single-line continuation → same tree as the paragraph before the block
+                    block_id = self.store.add_block(block_text, 'paragraph', last_structural_parent_id, owner_id)
+                    self.store.add_relation(last_structural_parent_id, block_id)
+                    last_structural_parent_id = None
+                else:
+                    # Multi-line or no pending parent → new root tree
+                    block_id = self.store.add_block(block_text, 'paragraph', None, owner_id)
+                    last_structural_parent_id = None
+                
                 all_block_ids.append(block_id)
                 for ln, s in enumerate(sents):
                     sid = self.store.add_sentence(s, block_id, ln, 'sentence',

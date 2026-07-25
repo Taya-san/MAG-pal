@@ -51,6 +51,12 @@ def extract_top_words(text, content_type='paragraph', max_words=5):
     if content_type == 'table':
         return _extract_table_top_words(text, max_words)
 
+    # Code and equation content is mostly symbols — not useful as keywords.
+    # The structural type name (e.g. 'code', 'equation') is seeded separately
+    # in add_block().
+    if content_type in ('code', 'equation'):
+        return []
+
     cleaned = re.sub(r'[^a-z\s]', ' ', text.lower())
     words = [w for w in cleaned.split() if w not in STOPWORDS and len(w) > 2]
     if not words:
