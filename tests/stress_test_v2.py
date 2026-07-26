@@ -37,9 +37,9 @@ cur.execute("SELECT COUNT(*) FROM blocks")
 bc = cur.fetchone()[0]
 cur.execute("SELECT COUNT(*) FROM sentences")
 sc = cur.fetchone()[0]
-check(f"At least 50 blocks after dedup", bc >= 50, f"got {bc}")
-check(f"Sentences match blocks", sc >= bc, f"got {sc}")
-print(f"  Load time: {elapsed:.2f}s")
+check(f"500 blocks created", bc == 500, f"got {bc}")
+check(f"Sentences created", sc >= 500, f"got {sc}")
+check(f"Load time < 30s", elapsed < 30.0, f"took {elapsed:.2f}s")
 
 # Flag all sentences
 cur.execute("UPDATE sentences SET label = 'flagged'")
@@ -49,7 +49,8 @@ print(f"  Memory: {bc} blocks, {sc} sentences")
 # ============================================================
 # 2. Build index + scoring speed
 # ============================================================
-print("=== 2. Scoring speed (500 calls) ===")
+print("
+=== 2. Scoring speed (500 calls) ===")
 iv = StreamIntervention(memory_store=store, owner_id=1)
 check("Index built", len(iv.keyword_index) > 0)
 print(f"  Index entries: {len(iv.keyword_index)} keywords")
@@ -63,13 +64,14 @@ for i in range(500):
         hit_count += 1
     iv.decrement_cooldowns(100)
 elapsed = time.time() - start
-print(f"  500 calls took {elapsed:.2f}s")
+check(f"500 scoring calls", elapsed < 15.0, f"took {elapsed:.2f}s")
 print(f"  Hits: {hit_count}/500 (cooldown may reduce some)")
 
 # ============================================================
 # 3. Intervention quality check
 # ============================================================
-print("=== 3. Intervention quality ===")
+print("
+=== 3. Intervention quality ===")
 # Fresh store for clean measurements
 db2 = tempfile.mktemp(suffix='.db')
 store2 = MemoryStore(db2)
@@ -123,7 +125,8 @@ os.unlink(db2)
 # ============================================================
 # 4. Mixed content: code, equations, lists
 # ============================================================
-print("=== 4. Mixed content ===")
+print("
+=== 4. Mixed content ===")
 db3 = tempfile.mktemp(suffix='.db')
 store3 = MemoryStore(db3)
 bp3 = BlockParser(store3)
@@ -163,7 +166,7 @@ iv3 = StreamIntervention(memory_store=store3, owner_id=1)
 check("Mixed index built", len(iv3.keyword_index) > 0)
 
 m = iv3.check_paragraph("The code prints a greeting to the screen.")
-print(f"  ~ Code match: {m['tier'] if m else None} (code keyword filtered from index)")
+check("Code paragraph match", m is not None)
 iv3.decrement_cooldowns(200)
 
 m2 = iv3.check_paragraph("The quadratic formula solves polynomial equations.")
@@ -175,7 +178,8 @@ os.unlink(db3)
 # ============================================================
 # 5. Decay under real load
 # ============================================================
-print("=== 5. Decay under load ===")
+print("
+=== 5. Decay under load ===")
 db4 = tempfile.mktemp(suffix='.db')
 store4 = MemoryStore(db4)
 bp4 = BlockParser(store4)
@@ -217,7 +221,8 @@ os.unlink(db4)
 # ============================================================
 # 6. Concurrent-like fast sequential access
 # ============================================================
-print("=== 6. High-frequency access ===")
+print("
+=== 6. High-frequency access ===")
 db5 = tempfile.mktemp(suffix='.db')
 store5 = MemoryStore(db5)
 bp5 = BlockParser(store5)
@@ -241,7 +246,7 @@ for i in range(1000):
     # Vary cooldown decay to simulate realistic streaming
     iv5.decrement_cooldowns(random.randint(50, 300))
 elapsed = time.time() - start
-print(f"  1000 rapid calls took {elapsed:.2f}s")
+check(f"1000 rapid calls", elapsed < 30.0, f"took {elapsed:.2f}s")
 check(f"  At least some hits", total_hits > 0, f"got {total_hits} hits")
 print(f"  Hits: {total_hits}/1000")
 
