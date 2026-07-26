@@ -1,12 +1,11 @@
 from __future__ import annotations
 import json
-import pickle
+
 import re
-import sqlite3
-import time
+
+
 from collections import defaultdict
-from pathlib import Path
-import numpy as np
+
 from text_utils import (
     extract_top_words,
     merge_top_words,
@@ -14,7 +13,6 @@ from text_utils import (
     inject_type_keywords,
     filter_injected_keywords,
 )
-from stopwords import STOPWORDS
 SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z"(\[])')
 
 
@@ -411,9 +409,9 @@ class BlockParser:
         self.store.conn.commit()
 
 
-from memory_store import MemoryStore
 
 if __name__ == "__main__":
+    from memory_store import MemoryStore
     print("Testing MemoryStore + BlockParser...")
     store = MemoryStore(":memory:")
 

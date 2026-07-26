@@ -52,44 +52,22 @@ class Config:
     name_to_owner: dict[str, int]
 
     # === LEGACY ALIASES (for backward compatibility) ===
-    @property
-    def DISCORD_TOKEN(self): return self.disc_token
-    @property
-    def OPENROUTER_API_KEY(self): return self.openrouter_key
-    @property
-    def OWNER_ID(self): return self.owner_id
-    @property
-    def PAL_NAME(self): return self.pal_name
-    @property
-    def USER_NAME(self): return self.user_name
-    @property
-    def PERSONALITY(self): return self.personality
-    @property
-    def INTERESTS(self): return self.interests
-    @property
-    def MAG_LANG(self): return self.mag_lang
-    @property
-    def RESPONSE_LENGTH(self): return self.response_length
-    @property
-    def MODEL(self): return self.model
-    @property
-    def MAX_TOKENS(self): return self.max_tokens
-    @property
-    def TEMPERATURE(self): return self.temperature
-    @property
-    def DEBUG(self): return self.debug
-    @property
-    def SUMMARIZE(self): return self.summarize
-    @property
-    def SUMMARY_INTERVAL(self): return self.summary_interval
-    @property
-    def DB_PATH(self): return self.db_path
-    @property
-    def HEURISTIC_CONTINUATION_MINUTES(self): return self.heuristic_continuation_minutes
-    @property
-    def OWNER_NAMES(self): return self.owner_names
-    @property
-    def NAME_TO_OWNER(self): return self.name_to_owner
+    _LEGACY_ALIASES = {
+        'DISCORD_TOKEN': 'disc_token', 'OPENROUTER_API_KEY': 'openrouter_key',
+        'MODEL': 'model', 'MAX_TOKENS': 'max_tokens', 'TEMPERATURE': 'temperature',
+        'OWNER_ID': 'owner_id', 'PAL_NAME': 'pal_name', 'USER_NAME': 'user_name',
+        'PERSONALITY': 'personality', 'INTERESTS': 'interests', 'MAG_LANG': 'mag_lang',
+        'RESPONSE_LENGTH': 'response_length', 'DEBUG': 'debug',
+        'SUMMARIZE': 'summarize', 'SUMMARY_INTERVAL': 'summary_interval',
+        'DB_PATH': 'db_path', 'HEURISTIC_CONTINUATION_MINUTES': 'heuristic_continuation_minutes',
+        'OWNER_NAMES': 'owner_names', 'NAME_TO_OWNER': 'name_to_owner',
+    }
+
+    def __getattr__(self, name):
+        if name in self._LEGACY_ALIASES:
+            return getattr(self, self._LEGACY_ALIASES[name])
+        raise AttributeError(f"'Config' object has no attribute '{name}'")
+
 
     @classmethod
     def from_env(cls) -> Config:
