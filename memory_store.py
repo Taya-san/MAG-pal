@@ -32,7 +32,7 @@ import numpy as np
 from text_utils import (
     extract_top_words,
     merge_top_words,
-    detect_bare_reference,
+    is_keyword_sparse,
     inject_type_keywords,
     filter_injected_keywords,
 )
@@ -64,7 +64,7 @@ class MemoryStore:
     """
 
     def __init__(self, db_path=None, lda_path=None):
-        """Connect to SQLite, create tables, optionally load LDA model."""
+        """Initialize MemoryStore: connect to SQLite, load LDA, create tables."""
         self.db_path = db_path or str(Path(__file__).parent / "memory.db")
         # sqlite3.connect() opens a connection to a SQLite database file.
         # If the file doesn't exist, SQLite creates it.
@@ -161,7 +161,7 @@ class MemoryStore:
     # These create new blocks, sentences, and relations in the database.
 
     def _block_richness(self, text, block_type):
-        """Estimate how information-rich a block's text is."""
+        """Return richness score for dedup: line count for code, word count otherwise."""
         if block_type == 'code':
             return len(text.split('\n'))
         return len(text.split())
@@ -176,7 +176,7 @@ class MemoryStore:
     BASE_TTL = 7 * 24 * 3600  # 7 days default
 
     def _compute_keyword_uniqueness(self, block_id, owner_id):
-        """Score how unique this block's keywords are (0.0-1.0)."""
+        """Score keyword rarity (0.0-1.0): fewer blocks sharing a keyword = more unique."""
         cur = self.conn.cursor()
         cur.execute("SELECT top_words FROM blocks WHERE id = ?", (block_id,))
         row = cur.fetchone()
@@ -199,14 +199,14 @@ class MemoryStore:
         return sum(scores) / len(scores)
 
     def _compute_initial_ttl(self, text, block_id, owner_id):
-        """Compute initial TTL for a new sentence."""
+        """Compute initial TTL from word count + keyword uniqueness bonus."""
         word_bonus = min(len(text.split()) * 3600, 7 * 24 * 3600)
         uniqueness = self._compute_keyword_uniqueness(block_id, owner_id)
         uniqueness_bonus = uniqueness * 14 * 24 * 3600
         return self.BASE_TTL + word_bonus + uniqueness_bonus
 
     def _extend_sentence_ttl(self, sentence_ids):
-        """Extend TTL for accessed sentences. More accesses = longer extension."""
+        """Extend TTL on memory access: more frequent access = longer extension."""
         if not sentence_ids:
             return
         cur = self.conn.cursor()
@@ -327,7 +327,7 @@ class MemoryStore:
 
     def _handle_structural_dedup(self, existing_id, text, top_words,
                                      new_richness, existing_richness):
-        """Replace a code/eq/table block if the new text is richer."""
+        """Replace code/eq/table block with new text only if it is longer (richer)."""
         if new_richness <= existing_richness:
             return existing_id, False
         cur = self.conn.cursor()
@@ -339,7 +339,7 @@ class MemoryStore:
         return existing_id, False
 
     def _handle_paragraph_dedup(self, existing_id, text, top_words):
-        """Merge new unique sentences into a paragraph/list block."""
+        """Merge new unique sentences into existing paragraph/list block (append-only)."""
         cur = self.conn.cursor()
         cur.execute("SELECT text, top_words FROM blocks WHERE id = ?", (existing_id,))
         old_row = cur.fetchone()

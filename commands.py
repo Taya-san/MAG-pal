@@ -14,8 +14,11 @@ This separation means commands can be tested without a Discord connection:
     result = await cmd_stats(mock_bot, mock_message, "")
 """
 
+from __future__ import annotations
+
 import logging
 import time
+
 from datetime import datetime, timezone
 
 __all__ = ["HANDLERS", "cmd_debug", "cmd_keywords", "cmd_remember", "cmd_forget", "cmd_bad", "cmd_showprompt", "cmd_stats", "cmd_clear", "cmd_alias", "cmd_pin"]
@@ -66,7 +69,7 @@ async def cmd_forget(bot, message, args):
         await message.channel.send("Cleared all auto-learned keywords.")
 
 
-async def cmd_bad(bot, message, args):
+async def cmd_flag(bot, message, args):
     """Flag the last bot response as bad for review."""
     info = bot.last_response_info.get(message.channel.id)
     if not info:

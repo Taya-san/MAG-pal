@@ -9,7 +9,7 @@ from collections import defaultdict
 from text_utils import (
     extract_top_words,
     merge_top_words,
-    detect_bare_reference,
+    is_keyword_sparse,
     inject_type_keywords,
     filter_injected_keywords,
 )
@@ -315,7 +315,7 @@ class BlockParser:
 
             # Bare reference detection: if parent has <3 keywords,
             # inject structural type descriptors
-            if detect_bare_reference(parent_words):
+            if is_keyword_sparse(parent_words):
                 parent_words = inject_type_keywords(parent_words, child_types)
                 cur.execute(
                     "UPDATE blocks SET top_words = ? WHERE id = ?",

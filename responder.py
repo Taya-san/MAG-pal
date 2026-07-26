@@ -13,11 +13,13 @@ from __future__ import annotations
 #   Assembles system instructions + conversation history + keywords
 #   + current message into the format OpenRouter expects.
 
+from __future__ import annotations
+
 import logging
 import re
-# Docs: https://docs.python.org/3/library/re.html
-from datetime import datetime, timezone
 from enum import Enum
+
+from datetime import datetime, timezone
 
 __all__ = ["Responder"]
 

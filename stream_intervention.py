@@ -201,7 +201,7 @@ class StreamIntervention:
         return emitted
 
     @staticmethod
-    def _buf_extract(buffer: str) -> tuple[list[str], str]:
+    def _extract_words_from_buffer(buffer: str) -> tuple[list[str], str]:
         """
         Static version of buffer_token. Same logic, but operates on
         a passed-in string instead of self.word_buffer.

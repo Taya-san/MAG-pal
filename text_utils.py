@@ -26,7 +26,7 @@ def merge_top_words(parent_words, child_words, max_words=12):
     return merged[:max_words]
 
 
-def detect_bare_reference(top_words):
+def is_keyword_sparse(top_words):
     return len(top_words) < MIN_WORDS_FOR_RICH
 
 

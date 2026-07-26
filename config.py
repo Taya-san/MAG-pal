@@ -8,6 +8,8 @@ Access values like: config.DISCORD_TOKEN, config.PAL_NAME, etc.
 
 from __future__ import annotations
 
+from __future__ import annotations
+
 import os
 from dataclasses import dataclass
 
