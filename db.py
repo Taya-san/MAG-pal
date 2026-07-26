@@ -17,6 +17,8 @@ import aiosqlite
 
 from datetime import datetime, timedelta, timezone
 
+__all__ = ["Database"]
+
 
 class Database:
     # Wraps an aiosqlite connection with convenient methods.

@@ -3,6 +3,8 @@ from collections import Counter
 from stopwords import STOPWORDS
 import re
 
+__all__ = ["extract_top_words", "merge_top_words", "detect_bare_reference", "inject_type_keywords", "filter_injected_keywords", "OBJECT_TYPE_KEYWORDS"]
+
 
 OBJECT_TYPE_KEYWORDS = {
     'table':    ['row', 'column', 'data', 'value', 'comparison', 'entry', 'feature', 'property'],

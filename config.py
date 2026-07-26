@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+
+__all__ = ["Config"]
 # Docs: https://github.com/theskumar/python-dotenv
 
 

@@ -21,6 +21,8 @@ We maintain TWO client instances because:
 import time
 import logging
 from openai import AsyncOpenAI, OpenAI, APIError, RateLimitError
+
+__all__ = ["OpenRouterClient"]
 # Docs: https://platform.openai.com/docs/api-reference
 #        https://openrouter.ai/docs/api-reference
 

@@ -38,6 +38,8 @@ from text_utils import (
 )
 from stopwords import STOPWORDS
 
+__all__ = ["MemoryStore", "BlockParser"]
+
 # Split text into sentences at punctuation + capital letter boundaries
 SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z"(\[])')
 

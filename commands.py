@@ -18,6 +18,8 @@ import logging
 import time
 from datetime import datetime, timezone
 
+__all__ = ["HANDLERS", "cmd_debug", "cmd_keywords", "cmd_remember", "cmd_forget", "cmd_bad", "cmd_showprompt", "cmd_stats", "cmd_clear", "cmd_alias", "cmd_pin"]
+
 logger = logging.getLogger("palbot")
 
 
