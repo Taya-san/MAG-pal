@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Tree Parser — parses AI response text into a hierarchical tree structure.
 

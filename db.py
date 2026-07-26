@@ -1,3 +1,4 @@
+from __future__ import annotations
 # db.py
 # SQLite database layer using aiosqlite (async version of sqlite3).
 # Stores: your messages, extracted keywords, and per-channel session data.

@@ -1,3 +1,4 @@
+from __future__ import annotations
 STOPWORDS = {
     'a', 'about', 'above', 'across', 'actually', 'ada', 'adalah', 'adanya',
     'adapun', 'after', 'afterwards', 'again', 'against', 'agak', 'agaknya', 'agar',

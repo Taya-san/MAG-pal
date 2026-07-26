@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """Comprehensive stress test with 500 varied paragraphs, mixed content, timing."""
 import sys, os, tempfile, time, random, json

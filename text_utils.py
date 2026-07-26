@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections import Counter
 from stopwords import STOPWORDS
 import re
@@ -64,15 +65,15 @@ def extract_top_words(text, content_type='paragraph', max_words=5):
     return [w for w, _ in Counter(words).most_common(max_words)]
 
 
-def _extract_table_top_words(text, max_words=5):
+def _parse_table_grid(text):
+    """Parse raw |...| rows into a 2D grid. Returns (header, data_rows) or (None, None)."""
     rows = text.strip().split('\n')
     if not rows:
-        return []
+        return None, None
 
     grid = []
     for row in rows:
         cells = [c.strip().lower() for c in row.split('|')]
-        # Remove leading/trailing empty cells (from outer ||)
         if cells and cells[0] == '':
             cells = cells[1:]
         if cells and cells[-1] == '':
@@ -84,9 +85,13 @@ def _extract_table_top_words(text, max_words=5):
         grid.append(cells)
 
     if len(grid) < 2:
-        return []
+        return None, None
+    return grid[0], grid[1:]
 
-    header, data = grid[0], grid[1:]
+def _extract_table_top_words(text, max_words=5):
+    header, data = _parse_table_grid(text)
+    if header is None:
+        return []
 
     def is_numeric(val):
         # Pure numbers: ints (1), floats (0.95), negatives (-5), scientific (1e-3)

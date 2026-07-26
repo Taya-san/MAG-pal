@@ -1,3 +1,4 @@
+from __future__ import annotations
 #!/usr/bin/env python3
 """Run all tests: core + decay + integration checks."""
 import sys, os, tempfile, importlib.util
@@ -59,7 +60,7 @@ def test_decay_touch():
     cur = s.conn.cursor()
     cur.execute("SELECT id FROM sentences")
     sid = cur.fetchone()[0]
-    s._touch_sentences({sid})
+    s._extend_sentence_ttl({sid})
     cur.execute("SELECT access_count FROM sentences WHERE id = ?", (sid,))
     assert cur.fetchone()[0] == 1
     os.unlink(db)

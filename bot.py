@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Discord client — message gating, AI processing, streaming intervention loop.
 

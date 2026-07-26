@@ -1,3 +1,4 @@
+from __future__ import annotations
 # Auto-generated test data
 PARAGRAPHS = [
     'The matrix eigenvalue problem is central to linear algebra applications.',

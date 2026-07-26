@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 OpenRouter API client — sync and async streaming with reasoning detection.
 

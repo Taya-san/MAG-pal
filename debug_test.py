@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 MAG-pal Diagnostic Test
 Measures RAM/CPU, tests all modules independently,

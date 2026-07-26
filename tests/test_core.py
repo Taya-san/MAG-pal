@@ -1,3 +1,4 @@
+from __future__ import annotations
 """Tests for streaming intervention, memory store, and database operations."""
 
 import sys

@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Hierarchical memory store — SQLite-backed block/sentence storage.
 
@@ -36,6 +37,9 @@ from text_utils import (
     filter_injected_keywords,
 )
 from stopwords import STOPWORDS
+
+# Split text into sentences at punctuation + capital letter boundaries
+SENTENCE_SPLIT_RE = re.compile(r'(?<=[.!?])\s+(?=[A-Z"(\[])')
 
 
 class MemoryStore:
@@ -199,7 +203,7 @@ class MemoryStore:
         uniqueness_bonus = uniqueness * 14 * 24 * 3600
         return self.BASE_TTL + word_bonus + uniqueness_bonus
 
-    def _touch_sentences(self, sentence_ids):
+    def _extend_sentence_ttl(self, sentence_ids):
         """Extend TTL for accessed sentences. More accesses = longer extension."""
         if not sentence_ids:
             return
@@ -319,98 +323,94 @@ class MemoryStore:
 
         return best
 
+    def _handle_structural_dedup(self, existing_id, text, top_words,
+                                     new_richness, existing_richness):
+        """Replace a code/eq/table block if the new text is richer."""
+        if new_richness <= existing_richness:
+            return existing_id, False
+        cur = self.conn.cursor()
+        cur.execute(
+            "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
+            (text.strip(), json.dumps(top_words), time.time(), existing_id)
+        )
+        self.conn.commit()
+        return existing_id, False
+
+    def _handle_paragraph_dedup(self, existing_id, text, top_words):
+        """Merge new unique sentences into a paragraph/list block."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT text, top_words FROM blocks WHERE id = ?", (existing_id,))
+        old_row = cur.fetchone()
+        if old_row is None:
+            return existing_id, False
+
+        old_text, old_top_words_json = old_row
+        old_top_words = json.loads(old_top_words_json) if old_top_words_json else []
+
+        old_sents = [s.strip() for s in SENTENCE_SPLIT_RE.split(old_text) if len(s.strip()) > 3]
+        new_sents = [s.strip() for s in SENTENCE_SPLIT_RE.split(text) if len(s.strip()) > 3]
+
+        def _content_words(sent):
+            return set(
+                w for w in re.sub(r'[^\w\s]', ' ', sent.lower()).split()
+                if w not in STOPWORDS and len(w) > 2
+            )
+
+        added = []
+        for new_sent in new_sents:
+            new_content = _content_words(new_sent)
+            if not new_content:
+                added.append(new_sent)
+                continue
+
+            all_old = set()
+            for old_sent in old_sents:
+                all_old |= _content_words(old_sent)
+
+            if new_content - all_old:
+                added.append(new_sent)
+
+        if not added:
+            return existing_id, False
+
+        merged_text = old_text + ' ' + ' '.join(added)
+        merged_top_words = list(dict.fromkeys(old_top_words + top_words))[:12]
+        cur.execute(
+            "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
+            (merged_text.strip(), json.dumps(merged_top_words), time.time(), existing_id)
+        )
+        self.conn.commit()
+        return existing_id, False
+
     def add_block(self, text, block_type='paragraph', parent_id=None, owner_id=None):
         """
         Insert a new block into the database, with dedup.
         
-        Before inserting, checks if a similar block already exists (by keyword overlap).
-        If a similar block exists and is equally or more information-rich, skips
-        creation and returns the existing block's id. If the new block is richer,
-        updates the existing block in-place.
+        Checks for similar existing blocks by keyword overlap. If found:
+          - code/eq/table: replace if richer, otherwise skip.
+          - paragraph/list: merge new unique sentences into the existing block.
+        If no similar block exists, inserts a new one.
         
-        NOTE: When returning an existing block id, the caller will still add
-        sentences to it. This means duplicate sentence rows may accumulate.
-        This is acceptable for the initial version but should be refined.
-        
-        ... (rest of docstring)
+        Returns:
+            (block_id, is_new) tuple.
         """
         top_words = extract_top_words(text, content_type=block_type)
-
-        # Seed structural type name for retrieval
         structural_types = {'code', 'table', 'list', 'equation'}
         if block_type in structural_types and block_type not in top_words:
             top_words.append(block_type)
 
-        # Dedup: skip if similar block exists and is same or richer
         existing = self.find_similar_block(text, block_type, owner_id)
         if existing is not None:
             existing_id, existing_richness = existing
             new_richness = self._block_richness(text, block_type)
 
-            # For structural blocks (code/eq/table): replace if richer
             if block_type in ('code', 'equation', 'table'):
-                if new_richness <= existing_richness:
-                    return existing_id, False
-                cur = self.conn.cursor()
-                cur.execute(
-                    "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
-                    (text.strip(), json.dumps(top_words), time.time(), existing_id)
+                return self._handle_structural_dedup(
+                    existing_id, text, top_words, new_richness, existing_richness
                 )
-                self.conn.commit()
-                return existing_id, False
-
-            # For paragraphs/lists: merge new unique sentences instead of replacing
-            cur = self.conn.cursor()
-            cur.execute("SELECT text, top_words FROM blocks WHERE id = ?", (existing_id,))
-            old_row = cur.fetchone()
-            if old_row is None:
-                return existing_id
-
-            old_text, old_top_words_json = old_row
-            old_top_words = json.loads(old_top_words_json) if old_top_words_json else []
-
-            sent_splitter = re.compile(r'(?<=[.!?])\s+(?=[A-Z"(\[])')
-            old_sents = [s.strip() for s in sent_splitter.split(old_text) if len(s.strip()) > 3]
-            new_sents = [s.strip() for s in sent_splitter.split(text) if len(s.strip()) > 3]
-
-            added = []
-            for new_sent in new_sents:
-                new_content = set(
-                    w for w in re.sub(r'[^\w\s]', ' ', new_sent.lower()).split()
-                    if w not in STOPWORDS and len(w) > 2
-                )
-                if not new_content:
-                    added.append(new_sent)
-                    continue
-
-                # Check if new sentence has ANY content word not seen
-                # in any existing sentence. If so, it's truly new info
-                # (even if topic words like "gaussian elimination" overlap).
-                all_old_content = set()
-                for old_sent in old_sents:
-                    oc = set(
-                        w for w in re.sub(r'[^\w\s]', ' ', old_sent.lower()).split()
-                        if w not in STOPWORDS and len(w) > 2
-                    )
-                    all_old_content |= oc
-
-                if new_content - all_old_content:
-                    added.append(new_sent)
-
-            if not added:
-                return existing_id, False
-
-            merged_text = old_text + ' ' + ' '.join(added)
-            merged_top_words = list(dict.fromkeys(old_top_words + top_words))[:12]
-            cur.execute(
-                "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
-                (merged_text.strip(), json.dumps(merged_top_words), time.time(), existing_id)
-            )
-            self.conn.commit()
-            return existing_id, False
+            return self._handle_paragraph_dedup(existing_id, text, top_words)
 
         top_words = json.dumps(top_words)
-
         cur = self.conn.cursor()
         cur.execute(
             "INSERT INTO blocks (text, type, parent_id, top_words, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -691,456 +691,4 @@ class MemoryStore:
 # 5. Tables: Detect |...| lines, create table block + table_row sentences
 # 6. Paragraphs: Everything else — split into sentences, merge consecutive paragraphs
 
-class BlockParser:
-    """
-    Line-by-line markdown parser that stores hierarchical blocks into MemoryStore.
-    
-    Parse order (first match wins):
-      1. Code blocks (lines starting with ```)
-      2. Equations (lines starting with $$)
-      3. List items (numbered/bulleted lines)
-      4. Tables (lines starting and ending with |)
-      5. Paragraphs (everything else)
-    
-    After parsing, _propagate_top_words() runs to:
-      - Merge parent keywords into child blocks
-      - Detect "bare" parents and inject structural type keywords
-      - Seed type names on code/table/list/equation child blocks
-    
-    If embed_fn and LDA model are available, _classify_sentences() then
-    scores each sentence and labels it 'flagged' or 'unlabeled'.
-    """
-    
-    def __init__(self, memory_store, embed_fn=None):
-        self.store = memory_store
-        self.embed = embed_fn
-
-    def parse_and_store(self, text, owner_id=None):
-        """
-        Parse markdown text into hierarchical blocks and store in DB.
-        
-        Args:
-            text: Raw markdown text (typically an AI response).
-            owner_id: Discord user ID for privacy filtering.
-        
-        Returns:
-            (list_of_block_ids, list_of_sentence_ids)
-        """
-        all_block_ids = []
-        all_sentence_ids = []
-        lines = text.split('\n')
-        i = 0
-        current_block_id = None   # active block being built
-        last_block_type = None     # type of the last closed block
-        last_structural_parent_id = None  # paragraph that was parent before a structural block
-        
-        while i < len(lines):
-            stripped = lines[i].strip()
-
-            # ---- Empty lines ----
-            if not stripped:
-                # Empty lines reset block scope for structural types
-                if last_block_type in ('table', 'code', 'list', 'equation'):
-                    current_block_id = None
-                # For paragraphs: keep current_block_id so consecutive
-                # paragraphs merge into one block
-                i += 1
-                continue
-
-            # ---- Code block detection ----
-            if stripped.startswith('```'):
-                code_lines = [lines[i]]
-                i += 1
-                while i < len(lines) and not lines[i].strip().startswith('```'):
-                    code_lines.append(lines[i])
-                    i += 1
-                if i < len(lines):
-                    code_lines.append(lines[i])  # include closing ```
-                    i += 1
-
-                code_text = '\n'.join(code_lines)
-                block_id, is_new = self.store.add_block(code_text, 'code', current_block_id, owner_id)
-                all_block_ids.append(block_id)
-
-                if is_new:
-                    for ln, code_line in enumerate(code_lines):
-                        sid = self.store.add_sentence(
-                            code_line, block_id, ln, 'code_line',
-                            score=0.0, label='unlabeled', strip=False, owner_id=owner_id
-                        )
-                        all_sentence_ids.append(sid)
-
-                if current_block_id:
-                    self.store.add_relation(current_block_id, block_id)
-                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
-                current_block_id = None
-                last_block_type = 'code'
-                continue
-
-            # ---- Equation block detection ----
-            if stripped.startswith('$$'):
-                eq_lines = [lines[i]]
-                i += 1
-                while i < len(lines) and not lines[i].strip().endswith('$$'):
-                    eq_lines.append(lines[i])
-                    i += 1
-                if i < len(lines):
-                    eq_lines.append(lines[i])
-                    i += 1
-
-                eq_text = '\n'.join(eq_lines)
-                block_id, is_new = self.store.add_block(eq_text, 'equation', current_block_id, owner_id)
-                all_block_ids.append(block_id)
-
-                if is_new:
-                    for ln, eql in enumerate(eq_lines):
-                        sid = self.store.add_sentence(
-                            eql, block_id, ln, 'equation',
-                            score=0.0, label='unlabeled', owner_id=owner_id
-                        )
-                        all_sentence_ids.append(sid)
-
-                if current_block_id:
-                    self.store.add_relation(current_block_id, block_id)
-                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
-                current_block_id = None
-                last_block_type = 'equation'
-                continue
-
-            # ---- List item detection ----
-            # Matches lines like: "1. text", "1) text", "- text", "* text"
-            if re.match(r'^\s*(?:\d+[\.\)]|[-*])\s', stripped):
-                if current_block_id is None:
-                    block_id, _ = self.store.add_block(stripped, 'list', None, owner_id)
-                    current_block_id = block_id
-                    all_block_ids.append(block_id)
-
-                line_num = len(self.store.get_sentences_by_block(current_block_id))
-                sid = self.store.add_sentence(
-                    stripped, current_block_id, line_num, 'list_item',
-                    score=0.0, label='unlabeled', owner_id=owner_id
-                )
-                all_sentence_ids.append(sid)
-
-                # Update block text with new list item content
-                cur = self.store.conn.cursor()
-                cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
-                existing = cur.fetchone()[0]
-                new_text = existing + ' ' + stripped if existing else stripped
-                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
-                    (new_text, json.dumps(extract_top_words(new_text)), current_block_id))
-                self.store.conn.commit()
-                last_block_type = 'list'
-                i += 1
-                continue
-
-            # ---- Table detection ----
-            if stripped.startswith('|') and stripped.endswith('|'):
-                table_lines = [lines[i]]
-                i += 1
-                while i < len(lines) and lines[i].strip().startswith('|') and lines[i].strip().endswith('|'):
-                    table_lines.append(lines[i])
-                    i += 1
-
-                table_text = '\n'.join(table_lines)
-                block_id, is_new = self.store.add_block(table_text, 'table', current_block_id, owner_id)
-                all_block_ids.append(block_id)
-
-                if is_new:
-                    for ln, tl in enumerate(table_lines):
-                        sid = self.store.add_sentence(tl, block_id, ln, 'table_row', owner_id=owner_id)
-                        all_sentence_ids.append(sid)
-
-                if current_block_id:
-                    self.store.add_relation(current_block_id, block_id)
-                    last_structural_parent_id = current_block_id  # save for single-sentence continuations
-                current_block_id = None
-                last_block_type = 'table'
-                continue
-
-            # ---- Regular sentence (paragraph) ----
-            # There are three cases:
-            # A) current_block exists, line doesn't end with ":" -> append to block
-            # B) current_block exists, line ends with ":" -> append, mark as parent
-            # C) no current_block -> create new paragraph block
-            
-            if current_block_id is not None and not stripped.endswith(':'):
-                # Case A: Append line to existing paragraph block
-                for ln, s in enumerate(re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped)):
-                        # Split on sentence boundaries. Regex:
-                        # (?<=[.!?])  = lookbehind for punctuation ending sentence
-                        # \s+         = whitespace gap
-                        # (?=[A-Z"(\[]) = lookahead for next sentence's first letter
-                        # This keeps punctuation attached to the first sentence.
-                        # Split on sentence boundaries. Regex:
-                        # (?<=[.!?])  = lookbehind for punctuation ending sentence
-                        # \s+         = whitespace gap
-                        # (?=[A-Z"(\[]) = lookahead for next sentence's first letter
-                        # This keeps punctuation attached to the first sentence.
-                    s = s.strip()
-                    if not s:
-                        continue
-                    sid = self.store.add_sentence(s, current_block_id, ln, 'sentence',
-                                                   owner_id=owner_id)
-                    all_sentence_ids.append(sid)
-
-                # Update block text and top_words
-                cur = self.store.conn.cursor()
-                cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
-                existing = cur.fetchone()[0]
-                new_text = existing + ' ' + stripped
-                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
-                    (new_text, json.dumps(extract_top_words(new_text)),
-                     current_block_id))
-                self.store.conn.commit()
-                last_block_type = 'paragraph'
-                
-            elif current_block_id is not None and stripped.endswith(':'):
-                # Case B: Line ends with ":" — marks a parent paragraph
-                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped) if len(s.strip()) > 3]
-                block_text = ' '.join(sents)
-                cur = self.store.conn.cursor()
-                cur.execute("SELECT text FROM blocks WHERE id = ?", (current_block_id,))
-                existing = cur.fetchone()[0]
-                new_text = existing + ' ' + block_text
-                cur.execute("UPDATE blocks SET text = ?, top_words = ? WHERE id = ?",
-                    (new_text, json.dumps(extract_top_words(new_text)),
-                     current_block_id))
-                self.store.conn.commit()
-                for ln, s in enumerate(sents):
-                    sid = self.store.add_sentence(s, current_block_id, ln, 'sentence',
-                                                   owner_id=owner_id)
-                    all_sentence_ids.append(sid)
-                last_block_type = 'paragraph'
-            else:
-                # Case C: Start a new paragraph block
-                sents = [s.strip() for s in re.split(r'(?<=[.!?])\s+(?=[A-Z"(\[])', stripped) if len(s.strip()) > 3]
-                        # Split on sentence boundaries. Regex:
-                        # (?<=[.!?])  = lookbehind for punctuation ending sentence
-                        # \s+         = whitespace gap
-                        # (?=[A-Z"(\[]) = lookahead for next sentence's first letter
-                        # This keeps punctuation attached to the first sentence.
-                
-                block_text = ' '.join(sents)
-                
-                # Peek-ahead: if next non-blank line is a paragraph (not structural),
-                # this is the start of a multi-line topic → new root.
-                # Otherwise it's a single-line continuation → same tree.
-                is_multi = False
-                if last_structural_parent_id is not None:
-                    peep = i + 1
-                    while peep < len(lines) and not lines[peep].strip():
-                        peep += 1
-                    is_multi = (
-                        peep < len(lines)
-                        and lines[peep].strip()
-                        and not lines[peep].strip().startswith('$$')
-                        and not lines[peep].strip().startswith('```')
-                        and not re.match(r'^\s*(?:\d+[\.\)]|[-*])\s', lines[peep].strip())
-                        and not (lines[peep].strip().startswith('|') and lines[peep].strip().endswith('|'))
-                    )
-                
-                if last_structural_parent_id is not None and not is_multi:
-                    # Single-line continuation → same tree as the paragraph before the block
-                    block_id, is_new = self.store.add_block(block_text, 'paragraph', last_structural_parent_id, owner_id)
-                    self.store.add_relation(last_structural_parent_id, block_id)
-                    last_structural_parent_id = None
-                else:
-                    # Multi-line or no pending parent → new root tree
-                    block_id, is_new = self.store.add_block(block_text, 'paragraph', None, owner_id)
-                    last_structural_parent_id = None
-                
-                all_block_ids.append(block_id)
-                if is_new:
-                    for ln, s in enumerate(sents):
-                        sid = self.store.add_sentence(s, block_id, ln, 'sentence',
-                                                       owner_id=owner_id)
-                        all_sentence_ids.append(sid)
-                current_block_id = block_id
-                last_block_type = 'paragraph'
-
-            i += 1
-
-        # After all blocks are parsed, propagate keywords
-        self._propagate_top_words()
-
-        # If embedding function and LDA model are available, classify sentences
-        if self.embed and self.store.lda:
-            self._classify_sentences(all_sentence_ids)
-
-        return all_block_ids, all_sentence_ids
-
-    def _propagate_top_words(self):
-        """
-        Propagate parent keywords to children: injection, merge, type seeding.
-        
-        For every parent-child relationship (from block_relations):
-        
-        1. BARE REFERENCE DETECTION: If parent has <3 content keywords
-           (like "check this table:" after stopword filtering), it's a
-           "bare reference" — a thin sentence that just introduces the
-           child. inject_type_keywords() adds structural descriptors
-           ("row", "column", "data") to give the parent more keywords.
-        
-        2. MERGE: merge_top_words() prepends parent keywords into each
-           child's top_words list (deduplicated, capped at 12).
-        
-        3. TYPE SEEDING: Each child gets its structural type name
-           appended to top_words (e.g., 'code' for a code child).
-           This is separate from the seeding in add_block() which only
-           applies to orphan blocks (no parent relationship).
-        """
-        cur = self.store.conn.cursor()
-        # Get all parent-child relations with child block types
-        cur.execute("""
-            SELECT r.parent_id, r.child_id, b.type AS child_type
-            FROM block_relations r
-            JOIN blocks b ON b.id = r.child_id
-            WHERE r.relation_type = 'child_of'
-        """)
-        parent_groups = defaultdict(list)
-        for pid, cid, ctype in cur.fetchall():
-            parent_groups[pid].append((cid, ctype))
-
-        for pid, children in parent_groups.items():
-            # Get parent's current top_words
-            cur.execute("SELECT top_words FROM blocks WHERE id = ?", (pid,))
-            row = cur.fetchone()
-            if not row:
-                continue
-            parent_words = json.loads(row[0])
-            child_types = list({ct for _, ct in children})
-
-            # Bare reference detection: if parent has <3 keywords,
-            # inject structural type descriptors
-            if detect_bare_reference(parent_words):
-                parent_words = inject_type_keywords(parent_words, child_types)
-                cur.execute(
-                    "UPDATE blocks SET top_words = ? WHERE id = ?",
-                    (json.dumps(parent_words), pid)
-                )
-
-            for cid, ctype in children:
-                cur.execute("SELECT top_words FROM blocks WHERE id = ?", (cid,))
-                crow = cur.fetchone()
-                if not crow:
-                    continue
-                child_words = json.loads(crow[0])
-                
-                # Merge parent keywords into child (preprend, dedup, cap at 12)
-                merged = merge_top_words(parent_words, child_words)
-
-                # Seed the structural type name
-                type_name = ctype
-                if type_name and type_name not in {w.lower() for w in merged}:
-                    merged.append(type_name)
-                    merged = merged[:12]
-
-                cur.execute(
-                    "UPDATE blocks SET top_words = ? WHERE id = ?",
-                    (json.dumps(merged), cid)
-                )
-        self.store.conn.commit()
-
-    def _classify_sentences(self, sentence_ids):
-        """
-        Run LDA classifier on each sentence.
-        
-        LDA (Linear Discriminant Analysis) is a pre-trained binary
-        classifier that scores each sentence as "definitional" (positive
-        score = 'flagged') or "mundane" (negative score = 'unlabeled').
-        
-        Code lines, equations, and table rows inherit their parent
-        block's first sentence score and label — they're structural,
-        not semantic, so their individual classification isn't useful.
-        
-        The LDA model was trained on 142 curated examples with 97.9%
-        accuracy. It's loaded from models/lda_model.pkl.
-        """
-        cur = self.store.conn.cursor()
-        for sid in sentence_ids:
-            cur.execute("""
-                SELECT s.text, s.type, b.id as block_id
-                FROM sentences s
-                JOIN blocks b ON s.block_id = b.id
-                WHERE s.id = ?
-            """, (sid,))
-            row = cur.fetchone()
-            if not row:
-                continue
-            text, stype, block_id = row[0], row[1], row[2]
-
-            # Code lines, equations, and table rows inherit parent's label
-            if stype in ('code_line', 'equation', 'table_row'):
-                cur.execute("""
-                    SELECT parent_id FROM block_relations
-                    WHERE child_id = ? AND relation_type = 'child_of'
-                """, (block_id,))
-                parent_rel = cur.fetchone()
-                if parent_rel:
-                    cur.execute("""
-                        SELECT id, score, label FROM sentences
-                        WHERE block_id = ? AND type = 'sentence'
-                        ORDER BY line_number LIMIT 1
-                    """, (parent_rel[0],))
-                    ps = cur.fetchone()
-                    if ps:
-                        cur.execute("UPDATE sentences SET score = ?, label = ? WHERE id = ?",
-                            (ps[1], ps[2], sid))
-                        continue
-                cur.execute("UPDATE sentences SET score = 0.0, label = 'unlabeled' WHERE id = ?", (sid,))
-                continue
-
-            # Skip very short sentences (under 10 chars)
-            if len(text.strip()) < 10:
-                continue
-                
-            # Embed the sentence using the provided embedding function,
-            # then score it with LDA
-            emb = self.embed(text).reshape(1, -1)  # reshape to (1, 384) — LDA expects 2D input: (samples, features)
-            score = float(self.store.lda.decision_function(emb)[0])
-            label = 'flagged' if score > 0 else 'unlabeled'
-            cur.execute(
-                "UPDATE sentences SET score = ?, label = ? WHERE id = ?",
-                (score, label, sid)
-            )
-        self.store.conn.commit()
-
-
-if __name__ == "__main__":
-    print("Testing MemoryStore + BlockParser...")
-    store = MemoryStore(":memory:")
-
-    parser = BlockParser(store)
-
-    test = """A symmetric matrix equals its own transpose. Eigenvalues are always real for symmetric matrices.
-
-Key properties of symmetric matrices:
-1. A = A^T is the defining property
-2. All eigenvalues are real
-
-The spectral theorem guarantees:
-A = Q * Lambda * Q^T
-
-Implementation:
-```python
-def is_symmetric(A):
-    return np.allclose(A, A.T)
-```"""
-
-    block_ids, sent_ids = parser.parse_and_store(test)
-    stats = store.count_stats()
-    print(f"\nStored: {stats['sentences']} sentences, {stats['blocks']} blocks, {stats['relations']} relations")
-
-    print("\nBlocks tree:")
-    for b in store.get_tree():
-        print(f"\n  BLOCK {b['id']}: [{b['type']}] \"{b['text'][:60]}...\"")
-        print(f"    top_words: {b['top_words']}")
-        for c in b['children']:
-            print(f"    ├── CHILD {c['id']}: [{c['type']}] \"{c['text'][:50]}...\"")
-            print(f"    |   top_words: {c['top_words']}")
-        for s in store.get_sentences_by_block(b['id']):
-            print(f"    ├── SENT {s['id']}: [{s['type']}] \"{s['text'][:50]}...\"")
-
-    store.close()
-    print("\nDone!")
+from block_parser import BlockParser

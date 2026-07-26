@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 Stream Intervention — real-time memory injection during AI reasoning.
 
@@ -24,7 +25,7 @@ Four phases:
 import json
 import re
 import logging
-from text_utils import filter_injected_keywords, extract_top_words, extract_top_words
+from text_utils import filter_injected_keywords, extract_top_words
 
 logger = logging.getLogger("palbot")
 
@@ -523,7 +524,7 @@ class StreamIntervention:
         
         # Extend TTL for matched sentences (memory reinforcement)
         if self.store and best_sids:
-            self.store._touch_sentences(best_sids)
+            self.store._extend_sentence_ttl(best_sids)
 
         if not context or not tier:
             return None

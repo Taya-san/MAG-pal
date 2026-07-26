@@ -1,3 +1,4 @@
+from __future__ import annotations
 # main.py
 # ENTRY POINT — run this to start the bot.
 #

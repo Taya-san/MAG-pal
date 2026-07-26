@@ -1,3 +1,4 @@
+from __future__ import annotations
 # responder.py
 # THE BRAIN — decides WHEN to respond and builds the prompt.
 #
