@@ -240,14 +240,14 @@ class MemoryStore:
             # For structural blocks (code/eq/table): replace if richer
             if block_type in ('code', 'equation', 'table'):
                 if new_richness <= existing_richness:
-                    return existing_id
+                    return existing_id, False
                 cur = self.conn.cursor()
                 cur.execute(
                     "UPDATE blocks SET text = ?, top_words = ?, created_at = ? WHERE id = ?",
                     (text.strip(), json.dumps(top_words), time.time(), existing_id)
                 )
                 self.conn.commit()
-                return existing_id
+                return existing_id, False
 
             # For paragraphs/lists: merge new unique sentences instead of replacing
             cur = self.conn.cursor()
@@ -288,7 +288,7 @@ class MemoryStore:
                     added.append(new_sent)
 
             if not added:
-                return existing_id
+                return existing_id, False
 
             merged_text = old_text + ' ' + ' '.join(added)
             merged_top_words = list(dict.fromkeys(old_top_words + top_words))[:12]
@@ -297,7 +297,7 @@ class MemoryStore:
                 (merged_text.strip(), json.dumps(merged_top_words), time.time(), existing_id)
             )
             self.conn.commit()
-            return existing_id
+            return existing_id, False
 
         top_words = json.dumps(top_words)
 
@@ -307,7 +307,7 @@ class MemoryStore:
             (text.strip(), block_type, parent_id, top_words, owner_id, time.time())
         )
         self.conn.commit()
-        return cur.lastrowid
+        return cur.lastrowid, True
 
     def add_sentence(self, text, block_id, line_number=0, sent_type='sentence',
                      embedding=None, score=0.0, label='unlabeled', strip=True,
@@ -643,15 +643,16 @@ class BlockParser:
                     i += 1
 
                 code_text = '\n'.join(code_lines)
-                block_id = self.store.add_block(code_text, 'code', current_block_id, owner_id)
+                block_id, is_new = self.store.add_block(code_text, 'code', current_block_id, owner_id)
                 all_block_ids.append(block_id)
 
-                for ln, code_line in enumerate(code_lines):
-                    sid = self.store.add_sentence(
-                        code_line, block_id, ln, 'code_line',
-                        score=0.0, label='unlabeled', strip=False, owner_id=owner_id
-                    )
-                    all_sentence_ids.append(sid)
+                if is_new:
+                    for ln, code_line in enumerate(code_lines):
+                        sid = self.store.add_sentence(
+                            code_line, block_id, ln, 'code_line',
+                            score=0.0, label='unlabeled', strip=False, owner_id=owner_id
+                        )
+                        all_sentence_ids.append(sid)
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
@@ -672,15 +673,16 @@ class BlockParser:
                     i += 1
 
                 eq_text = '\n'.join(eq_lines)
-                block_id = self.store.add_block(eq_text, 'equation', current_block_id, owner_id)
+                block_id, is_new = self.store.add_block(eq_text, 'equation', current_block_id, owner_id)
                 all_block_ids.append(block_id)
 
-                for ln, eql in enumerate(eq_lines):
-                    sid = self.store.add_sentence(
-                        eql, block_id, ln, 'equation',
-                        score=0.0, label='unlabeled', owner_id=owner_id
-                    )
-                    all_sentence_ids.append(sid)
+                if is_new:
+                    for ln, eql in enumerate(eq_lines):
+                        sid = self.store.add_sentence(
+                            eql, block_id, ln, 'equation',
+                            score=0.0, label='unlabeled', owner_id=owner_id
+                        )
+                        all_sentence_ids.append(sid)
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
@@ -693,7 +695,7 @@ class BlockParser:
             # Matches lines like: "1. text", "1) text", "- text", "* text"
             if re.match(r'^\s*(?:\d+[\.\)]|[-*])\s', stripped):
                 if current_block_id is None:
-                    block_id = self.store.add_block(stripped, 'list', None, owner_id)
+                    block_id, _ = self.store.add_block(stripped, 'list', None, owner_id)
                     current_block_id = block_id
                     all_block_ids.append(block_id)
 
@@ -725,12 +727,13 @@ class BlockParser:
                     i += 1
 
                 table_text = '\n'.join(table_lines)
-                block_id = self.store.add_block(table_text, 'table', current_block_id, owner_id)
+                block_id, is_new = self.store.add_block(table_text, 'table', current_block_id, owner_id)
                 all_block_ids.append(block_id)
 
-                for ln, tl in enumerate(table_lines):
-                    sid = self.store.add_sentence(tl, block_id, ln, 'table_row', owner_id=owner_id)
-                    all_sentence_ids.append(sid)
+                if is_new:
+                    for ln, tl in enumerate(table_lines):
+                        sid = self.store.add_sentence(tl, block_id, ln, 'table_row', owner_id=owner_id)
+                        all_sentence_ids.append(sid)
 
                 if current_block_id:
                     self.store.add_relation(current_block_id, block_id)
@@ -823,19 +826,20 @@ class BlockParser:
                 
                 if last_structural_parent_id is not None and not is_multi:
                     # Single-line continuation → same tree as the paragraph before the block
-                    block_id = self.store.add_block(block_text, 'paragraph', last_structural_parent_id, owner_id)
+                    block_id, is_new = self.store.add_block(block_text, 'paragraph', last_structural_parent_id, owner_id)
                     self.store.add_relation(last_structural_parent_id, block_id)
                     last_structural_parent_id = None
                 else:
                     # Multi-line or no pending parent → new root tree
-                    block_id = self.store.add_block(block_text, 'paragraph', None, owner_id)
+                    block_id, is_new = self.store.add_block(block_text, 'paragraph', None, owner_id)
                     last_structural_parent_id = None
                 
                 all_block_ids.append(block_id)
-                for ln, s in enumerate(sents):
-                    sid = self.store.add_sentence(s, block_id, ln, 'sentence',
-                                                   owner_id=owner_id)
-                    all_sentence_ids.append(sid)
+                if is_new:
+                    for ln, s in enumerate(sents):
+                        sid = self.store.add_sentence(s, block_id, ln, 'sentence',
+                                                       owner_id=owner_id)
+                        all_sentence_ids.append(sid)
                 current_block_id = block_id
                 last_block_type = 'paragraph'
 
