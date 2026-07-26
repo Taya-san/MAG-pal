@@ -7,17 +7,15 @@ gates them (owner-only, no bots, no duplicates), stores data in the
 database, and spawns AI processing as background tasks.
 """
 
+
 import asyncio
 import logging
 import time
 from collections import deque
-from datetime import datetime, timezone
 
+from datetime import datetime, timezone
 import discord
 from discord.ext import tasks
-# Docs: https://discordpy.readthedocs.io/en/stable/
-#        https://docs.python.org/3/library/asyncio.html
-
 from config import Config
 from db import Database
 from keywords import extract_keywords
