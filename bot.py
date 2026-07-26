@@ -765,6 +765,13 @@ class PalBot(discord.Client):
                     logger.info(f"[DEBUG] Summary for {channel_id}: {summary_text[:200]}")
 
                 await self.db.update_session_summary(channel_id, summary_text)
+                
+                # Also store summary as a block in memory_store for keyword matching
+                self.memory_store.add_block(
+                    f"[Summary] {summary_text}",
+                    block_type='paragraph',
+                    owner_id=self.config.OWNER_ID,
+                )
                 logger.info(f"Summary saved for channel {channel_id}")
 
         except Exception as e:

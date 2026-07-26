@@ -473,6 +473,16 @@ class StreamIntervention:
             return None
 
         best = scores[0]
+        # Prioritization: require margin of at least 1 matched keyword
+        # over the runner-up to avoid ties between different topics.
+        if len(scores) >= 2:
+            top_count = len(best['matched_words'])
+            second_count = len(scores[1]['matched_words'])
+            if top_count - second_count < 1:
+                logger.info(f"Paragraph intervention: tie avoided "
+                           f"(top={top_count}, second={second_count})")
+                return None
+
         bid = best['block_id']
         ratio = best['ratio']
         has_structural = best['has_structural']
