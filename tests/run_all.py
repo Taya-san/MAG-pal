@@ -111,5 +111,28 @@ run_test("decay_permanent_survives", test_decay_permanent_survives)
 run_test("decay_expired_deleted", test_decay_expired_deleted)
 run_test("decay_intervention_works", test_decay_intervention_works)
 
-print(f"\n=== Results: {passed} passed, {failed} failed ===")
+
+# --- Stress tests ---
+print("\n=== Stress Tests ===")
+import subprocess
+result = subprocess.run(
+    [sys.executable, os.path.join(os.path.dirname(__file__), "stress_test.py")],
+    capture_output=True, text=True
+)
+for line in result.stdout.split("\n"):
+    if "OK" in line or "FAIL" in line:
+        print(line)
+    elif "Results" in line:
+        print(line)
+        import re
+        m = re.search(r"(\d+) passed, (\d+) failed", line)
+        if m:
+            passed += int(m.group(1))
+            failed += int(m.group(2))
+if result.returncode != 0:
+    for line in result.stderr.split("\n"):
+        if "FAIL" in line:
+            print(line)
+
+print(f"\n=== Final Results: {passed} passed, {failed} failed ===")
 sys.exit(1 if failed else 0)
