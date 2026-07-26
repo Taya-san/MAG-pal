@@ -24,7 +24,7 @@ Four phases:
 import json
 import re
 import logging
-from text_utils import filter_injected_keywords
+from text_utils import filter_injected_keywords, extract_top_words, extract_top_words
 
 logger = logging.getLogger("palbot")
 
@@ -409,6 +409,118 @@ class StreamIntervention:
                 self.cooldowns[sid] = new
         for sid in expired:
             del self.cooldowns[sid]
+
+    # ===== PARAGRAPH SCORING =====
+    # Score completed paragraphs against the keyword index.
+    #   - ratio <= 0.5: surface tier (parent paragraph only)
+
+    def _get_block_top_words(self, block_id: int) -> list[str]:
+        if not self.store:
+            return []
+        cur = self.store.conn.cursor()
+        cur.execute("SELECT top_words FROM blocks WHERE id = ?", (block_id,))
+        row = cur.fetchone()
+        return json.loads(row[0]) if row else []
+
+    def score_paragraph(self, paragraph_text: str) -> list[dict]:
+        para_words = set(extract_top_words(paragraph_text))
+        if not para_words:
+            return []
+
+        block_data = {}
+        for w in para_words:
+            if w not in self.keyword_index:
+                continue
+            for item in self.keyword_index[w]:
+                bid = item['block_id']
+                if bid not in block_data:
+                    block_data[bid] = {'matched': set(), 'sids': set()}
+                block_data[bid]['matched'].add(w)
+                block_data[bid]['sids'].add(item['sentence_id'])
+
+        results = []
+        for bid, info in block_data.items():
+            top_words = self._get_block_top_words(bid)
+            if not top_words:
+                continue
+            clean = filter_injected_keywords(top_words)
+            if not clean:
+                continue
+
+            matched_count = sum(1 for kw in clean if kw in info['matched'])
+            ratio = matched_count / len(clean) if clean else 0
+
+            all_cool = all(self.cooldowns.get(sid, 0) > 0 for sid in info['sids'])
+            if all_cool:
+                continue
+
+            has_structural = bool(info['matched'] & STRUCTURAL_NAMES)
+
+            results.append({
+                'block_id': bid,
+                'ratio': ratio,
+                'matched_words': info['matched'],
+                'has_structural': has_structural,
+                'sentence_ids': info['sids'],
+            })
+
+        results.sort(key=lambda x: -x['ratio'])
+        return results
+
+    def check_paragraph(self, paragraph_text: str) -> dict | None:
+        scores = self.score_paragraph(paragraph_text)
+        if not scores:
+            return None
+
+        best = scores[0]
+        bid = best['block_id']
+        ratio = best['ratio']
+        has_structural = best['has_structural']
+        best_sids = best['sentence_ids']
+        best_matched = best['matched_words']
+
+        context = None
+        tier = None
+
+        if ratio > 0.5:
+            tree = self.store.get_block_tree(bid) if self.store else None
+            context = self._format_tree(tree) if tree else None
+            tier = 'deep'
+        else:
+            parent = self._get_parent_text(bid) if self.store else None
+            if parent:
+                context = parent
+                tier = 'surface'
+            elif best_sids:
+                cur = self.store.conn.cursor()
+                cur.execute("SELECT text FROM sentences WHERE id = ?",
+                           (list(best_sids)[0],))
+                row = cur.fetchone()
+                if row:
+                    context = row[0]
+                    tier = 'surface'
+
+        if has_structural and context:
+            struct_word = next((w for w in best_matched if w in STRUCTURAL_NAMES), None)
+            if struct_word:
+                child = self._get_child_block(bid, struct_word) if self.store else None
+                if child and tier in ('surface', None):
+                    context = context + '\n\n' + child
+                    tier = 'specific'
+
+        for sid in best_sids:
+            self.cooldowns[sid] = COOLDOWN_LIMIT
+
+        if not context or not tier:
+            return None
+
+        logger.info(f"Paragraph intervention: {tier} match (ratio={ratio:.0%}, block={bid})")
+        return {
+            'tier': tier,
+            'context': context,
+            'block_id': bid,
+            'ratio': ratio,
+        }
 
     # ===== DB HELPERS =====
     # These methods query the MemoryStore database to fetch context

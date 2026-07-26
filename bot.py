@@ -644,33 +644,42 @@ class PalBot(discord.Client):
                             # Decrement all cooldowns by 1 per reasoning token
                             intervention.decrement_cooldowns(1)
                             
-                            # Feed the token into the word buffer.
-                            # buffer_token() assembles sub-word tokens into
-                            # complete words.
-                            for completed in intervention.buffer_token(token):
-                                # Check if this word matches any flagged sentence
-                                match = await intervention.check_match(
-                                    completed,
-                                    partial_reasoning[-400:],  # recent tokens only
-                                )
-                                if match:
-                                    # BUILD CONTINUATION PROMPT:
-                                    # 1. Original prompt
-                                    # 2. Partial reasoning so far (as assistant message)
-                                    # 3. Injected memory context (as system message)
-                                    current_prompt = self.responder.build_continuation_prompt(
-                                        current_prompt,
-                                        ''.join(partial_reasoning),
-                                        match['context'],
-                                    )
-                                    
-                                    # Reset the word buffer for the new stream
-                                    intervention.reset_buffer()
-                                    
-                                    interrupted = True
-                                    break  # break out of for loop
-                            if interrupted:
-                                break  # break out of async for loop
+                            # Detect paragraph boundary: double newline or
+                            # start of a structural block (equation, code).
+                            para_boundary = (
+                                '\n\n' in token
+                                or '\n$$' in token
+                                or '\n```' in token
+                            )
+                            
+                            # Feed the token into the word buffer
+                            # (needed to keep buffer in sync for future use).
+                            intervention.buffer_token(token)
+                            
+                            if para_boundary:
+                                # Extract completed paragraph from reasoning
+                                # (everything up to the last boundary marker).
+                                reasoning_text = ''.join(partial_reasoning)
+                                parts = reasoning_text.split('\n\n')
+                                # Use the most recently completed paragraph
+                                paragraph = ''
+                                for p in reversed(parts):
+                                    p = p.strip()
+                                    if len(p) > 20:  # meaningful paragraph
+                                        paragraph = p
+                                        break
+                                
+                                if paragraph:
+                                    match = intervention.check_paragraph(paragraph)
+                                    if match:
+                                        current_prompt = self.responder.build_continuation_prompt(
+                                            current_prompt,
+                                            reasoning_text,
+                                            match['context'],
+                                        )
+                                        intervention.reset_buffer()
+                                        interrupted = True
+                                        break
                                 
                         elif phase == 'output':
                             output_tokens.append(token)
@@ -678,14 +687,15 @@ class PalBot(discord.Client):
                     if not interrupted:
                         break  # stream completed naturally — exit while True
 
-            # After all streaming is done, flush any remaining word in
-            # the buffer and check for matches one last time.
-            for word in intervention.flush_buffer():
-                match = await intervention.check_match(word, partial_reasoning[-400:])
+            # After streaming, check the last paragraph for matches.
+            reasoning_text = ''.join(partial_reasoning)
+            last_paragraphs = [p.strip() for p in reasoning_text.split('\n\n') if len(p.strip()) > 20]
+            if last_paragraphs:
+                match = intervention.check_paragraph(last_paragraphs[-1])
                 if match:
                     current_prompt = self.responder.build_continuation_prompt(
                         current_prompt,
-                        ''.join(partial_reasoning),
+                        reasoning_text,
                         match['context'],
                     )
                     # One more stream with the final enriched prompt
