@@ -106,7 +106,10 @@ class MemoryStore:
                 score REAL DEFAULT 0.0,
                 label TEXT DEFAULT 'unlabeled',
                 owner_id INTEGER,
-                created_at REAL NOT NULL
+                created_at REAL NOT NULL,
+                access_count INTEGER DEFAULT 0,
+                expires_at REAL,
+                permanent INTEGER DEFAULT 0
             );
 
             CREATE TABLE IF NOT EXISTS block_relations (
@@ -129,7 +132,7 @@ class MemoryStore:
         """
         Add columns to existing databases for schema upgrades.
         
-        When we add a new column (like owner_id), existing database files
+        When we add a new column, existing database files
         don't have it. ALTER TABLE adds the new column. If it already
         exists, sqlite3 raises OperationalError which we catch silently.
         """
@@ -138,7 +141,14 @@ class MemoryStore:
                 self.conn.execute(f"ALTER TABLE {table} ADD COLUMN owner_id INTEGER")
                 self.conn.commit()
             except sqlite3.OperationalError:
-                # Column already exists - that's fine
+                pass
+        
+        # Memory decay columns
+        for col in ('access_count INTEGER DEFAULT 0', 'expires_at REAL', 'permanent INTEGER DEFAULT 0'):
+            try:
+                self.conn.execute(f"ALTER TABLE sentences ADD COLUMN {col}")
+                self.conn.commit()
+            except sqlite3.OperationalError:
                 pass
 
     # ===== INSERT METHODS =====
@@ -149,6 +159,110 @@ class MemoryStore:
         if block_type == 'code':
             return len(text.split('\n'))
         return len(text.split())
+
+    # ===== MEMORY DECAY =====
+    # Sentences expire over time. TTL is based on:
+    #   - Content length (longer = more important)
+    #   - Keyword uniqueness at block level (rarer keywords = more important)
+    #   - Access frequency (more matched = lives longer)
+    # Expired sentences are deleted with their entire block subtree.
+
+    BASE_TTL = 7 * 24 * 3600  # 7 days default
+
+    def _compute_keyword_uniqueness(self, block_id, owner_id):
+        """Score how unique this block's keywords are (0.0-1.0)."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT top_words FROM blocks WHERE id = ?", (block_id,))
+        row = cur.fetchone()
+        if not row:
+            return 0.5
+        top_words = json.loads(row[0])
+        if not top_words:
+            return 0.5
+
+        scores = []
+        for word in top_words:
+            cur.execute(
+                "SELECT COUNT(*) FROM blocks "
+                "WHERE (owner_id IS NULL OR owner_id = ?) AND top_words LIKE ?",
+                (owner_id, f'%"{word}"%')
+            )
+            count = cur.fetchone()[0]
+            scores.append(1.0 / max(count, 1))
+
+        return sum(scores) / len(scores)
+
+    def _compute_initial_ttl(self, text, block_id, owner_id):
+        """Compute initial TTL for a new sentence."""
+        word_bonus = min(len(text.split()) * 3600, 7 * 24 * 3600)
+        uniqueness = self._compute_keyword_uniqueness(block_id, owner_id)
+        uniqueness_bonus = uniqueness * 14 * 24 * 3600
+        return self.BASE_TTL + word_bonus + uniqueness_bonus
+
+    def _touch_sentences(self, sentence_ids):
+        """Extend TTL for accessed sentences. More accesses = longer extension."""
+        if not sentence_ids:
+            return
+        cur = self.conn.cursor()
+        now = time.time()
+        for sid in sentence_ids:
+            cur.execute("SELECT access_count, expires_at FROM sentences WHERE id = ?", (sid,))
+            row = cur.fetchone()
+            if not row:
+                continue
+            ac = row[0] + 1
+            old_expires = row[1]
+            if old_expires is None:
+                continue  # permanent
+            extension = 86400 * min(ac, 30)
+            new_expires = max(old_expires, now) + extension
+            cur.execute(
+                "UPDATE sentences SET access_count = ?, expires_at = ? WHERE id = ?",
+                (ac, new_expires, sid)
+            )
+        self.conn.commit()
+
+    def apply_memory_decay(self):
+        """Delete expired sentences + their entire block subtrees."""
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT id, block_id FROM sentences WHERE permanent = 0 AND expires_at IS NOT NULL AND expires_at < ?",
+            (time.time(),)
+        )
+        expired = cur.fetchall()
+        if not expired:
+            return 0, 0
+
+        expired_ids = [r[0] for r in expired]
+        affected_blocks = set(r[1] for r in expired)
+
+        cur.execute(
+            f"DELETE FROM sentences WHERE id IN ({','.join('?' * len(expired_ids))})",
+            expired_ids
+        )
+        deleted = cur.rowcount
+
+        for bid in affected_blocks:
+            cur.execute(
+                "SELECT COUNT(*) FROM sentences WHERE block_id = ?",
+                (bid,)
+            )
+            if cur.fetchone()[0] == 0:
+                self._delete_block_tree(bid)
+
+        self.conn.commit()
+        return deleted
+
+    def _delete_block_tree(self, block_id):
+        """Delete a block and all its child blocks recursively."""
+        cur = self.conn.cursor()
+        cur.execute("SELECT child_id FROM block_relations WHERE parent_id = ?", (block_id,))
+        for row in cur.fetchall():
+            self._delete_block_tree(row[0])
+        cur.execute("DELETE FROM block_relations WHERE parent_id = ? OR child_id = ?",
+                   (block_id, block_id))
+        cur.execute("DELETE FROM sentences WHERE block_id = ?", (block_id,))
+        cur.execute("DELETE FROM blocks WHERE id = ?", (block_id,))
 
     def find_similar_block(self, text, block_type, owner_id, threshold=0.5):
         """
@@ -165,8 +279,6 @@ class MemoryStore:
             if w not in ('code', 'equation', 'table', 'list')
         )
         if not new_words:
-            # Fallback to exact text match for blocks with no meaningful keywords
-            # (e.g. code, equations where extract_top_words returns []).
             cur = self.conn.cursor()
             cur.execute(
                 "SELECT id, text FROM blocks "
@@ -199,8 +311,6 @@ class MemoryStore:
                 continue
 
             intersection = new_words & existing_words
-            # Use similarity weighted toward recall: fraction of MIN set
-            # that overlaps. This handles "poor text → richer text" well.
             score = len(intersection) / min(len(new_words), len(existing_words)) if min(new_words, existing_words) else 0
 
             if score >= best_score:
@@ -335,9 +445,12 @@ class MemoryStore:
         # Convert numpy array to binary bytes for SQLite BLOB storage
         emb_blob = embedding.astype(np.float32).tobytes() if embedding is not None else None
         cur = self.conn.cursor()
+        # Compute initial TTL for memory decay
+        ttl = self._compute_initial_ttl(text_content, block_id, owner_id)
+        expires_at = time.time() + ttl
         cur.execute(
-            "INSERT INTO sentences (text, block_id, line_number, type, embedding, score, label, owner_id, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (text_content, block_id, line_number, sent_type, emb_blob, float(score), label, owner_id, time.time())
+            "INSERT INTO sentences (text, block_id, line_number, type, embedding, score, label, owner_id, created_at, access_count, expires_at, permanent) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 0)",
+            (text_content, block_id, line_number, sent_type, emb_blob, float(score), label, owner_id, time.time(), expires_at)
         )
         self.conn.commit()
         return cur.lastrowid
@@ -502,7 +615,10 @@ class MemoryStore:
         
         Returns:
             dict: {word: [{sentence_id, text, block_id, block_type}]}
+        
+        Note: apply_memory_decay() runs first to remove expired entries.
         """
+        self.apply_memory_decay()
         cur = self.conn.cursor()
         if owner_id is not None:
             cur.execute("""

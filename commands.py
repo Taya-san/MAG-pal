@@ -121,6 +121,27 @@ async def cmd_clear(bot, message, args):
     await message.add_reaction("\u2705")
 
 
+async def cmd_pin(bot, message, args):
+    """!pin <sentence_id> — mark a sentence as permanent (never expires)."""
+    if not args:
+        await message.channel.send("Usage: `!pin <sentence_id>`. Get sentence IDs from the debug log.")
+        return
+    try:
+        sid = int(args[0].strip())
+    except ValueError:
+        await message.channel.send("Sentence ID must be a number.")
+        return
+    cur = bot.memory_store.conn.cursor()
+    cur.execute("SELECT text FROM sentences WHERE id = ? AND owner_id = ?",
+               (sid, bot.config.OWNER_ID))
+    row = cur.fetchone()
+    if not row:
+        await message.channel.send(f"Sentence {sid} not found or not yours.")
+        return
+    cur.execute("UPDATE sentences SET permanent = 1, expires_at = NULL WHERE id = ?", (sid,))
+    bot.memory_store.conn.commit()
+    await message.channel.send(f"Pinned sentence **{sid}**: _{row[0][:100]}..._\nThis memory will never expire.")
+
 async def cmd_alias(bot, message, args):
     """
     Manage private nickname aliases.

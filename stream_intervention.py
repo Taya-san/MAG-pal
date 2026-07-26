@@ -510,6 +510,10 @@ class StreamIntervention:
 
         for sid in best_sids:
             self.cooldowns[sid] = COOLDOWN_LIMIT
+        
+        # Extend TTL for matched sentences (memory reinforcement)
+        if self.store and best_sids:
+            self.store._touch_sentences(best_sids)
 
         if not context or not tier:
             return None
