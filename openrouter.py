@@ -18,7 +18,6 @@ We maintain TWO client instances because:
 - async client: used for streaming (needs async for await on chunks)
 """
 
-from __future__ import annotations
 
 import time
 import logging

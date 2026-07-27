@@ -1,7 +1,7 @@
 from __future__ import annotations
 #!/usr/bin/env python3
 """Comprehensive stress test with 500 varied paragraphs, mixed content, timing."""
-import sys, os, tempfile, time, random, json
+import sys, os, tempfile, time, random
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 from memory_store import MemoryStore, BlockParser
 from stream_intervention import StreamIntervention

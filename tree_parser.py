@@ -30,7 +30,6 @@ Tree structure:
       └── Child: "| QR     | Fast  | High     |"                  ← table row
 """
 
-from __future__ import annotations
 
 import re
 

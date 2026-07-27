@@ -20,7 +20,6 @@ import pickle
 import re
 import sqlite3
 import time
-from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +28,7 @@ import numpy as np
 #        https://docs.python.org/3/library/sqlite3.html
 #        https://scikit-learn.org/stable/modules/generated/sklearn.discriminant_analysis.LinearDiscriminantAnalysis.html
 
+from block_parser import BlockParser
 from text_utils import (
     extract_top_words,
     merge_top_words,
@@ -692,5 +692,3 @@ class MemoryStore:
 # 4. Lists: Detect "1. " or "- " or "* " lines, create list block + list_item sentences
 # 5. Tables: Detect |...| lines, create table block + table_row sentences
 # 6. Paragraphs: Everything else — split into sentences, merge consecutive paragraphs
-
-from block_parser import BlockParser

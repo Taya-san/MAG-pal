@@ -14,12 +14,10 @@ This separation means commands can be tested without a Discord connection:
     result = await cmd_stats(mock_bot, mock_message, "")
 """
 
-from __future__ import annotations
 
 import logging
 import time
 
-from datetime import datetime, timezone
 
 __all__ = ["HANDLERS", "cmd_debug", "cmd_keywords", "cmd_remember", "cmd_forget", "cmd_bad", "cmd_showprompt", "cmd_stats", "cmd_clear", "cmd_alias", "cmd_pin"]
 

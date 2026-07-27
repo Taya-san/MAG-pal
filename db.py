@@ -11,10 +11,9 @@ from __future__ import annotations
 # All SQL uses parameterized queries (? placeholders).
 # This prevents SQL injection attacks.
 
-from __future__ import annotations
 
 import aiosqlite
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 __all__ = ["Database"]
 

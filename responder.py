@@ -13,7 +13,6 @@ from __future__ import annotations
 #   Assembles system instructions + conversation history + keywords
 #   + current message into the format OpenRouter expects.
 
-from __future__ import annotations
 
 import logging
 import re
