@@ -144,69 +144,10 @@ class Database:
         rows = await cursor.fetchall()
         return list(reversed(rows))
 
-    async def upsert_keyword(self, keyword: str, manual: bool = False):
-        # "Update or Insert" a keyword.
-        # If the keyword already exists: increment frequency, update last_seen.
-        # If it's new: insert with frequency=1.
-        # manual=True means the user used !remember (never decays).
-        now = datetime.now(timezone.utc).isoformat()
-        await self.conn.execute(
-            """
-            INSERT INTO keywords (keyword, frequency, is_manual, last_seen)
-            VALUES (?, 1, ?, ?)
-            ON CONFLICT(keyword) DO UPDATE SET
-                frequency = frequency + 1,
-                is_manual = CASE WHEN ? THEN 1 ELSE is_manual END,
-                last_seen = ?
-        """,
-            (keyword, 1 if manual else 0, now, manual, now),
-        )
-        await self.commit()
 
-    async def get_top_keywords(self, limit: int = 20):
-        # Returns the most frequent keywords.
-        # Used in the AI prompt to remind it what you talk about.
-        cursor = await self.conn.execute(
-            "SELECT keyword, frequency, is_manual FROM keywords ORDER BY frequency DESC LIMIT ?",
-            (limit,),
-        )
-        return await cursor.fetchall()
 
-    async def get_all_keywords(self):
-        # Returns every keyword ordered by frequency.
-        # Used by the !kw command.
-        cursor = await self.conn.execute(
-            "SELECT keyword, frequency, is_manual, last_seen FROM keywords ORDER BY frequency DESC"
-        )
-        return await cursor.fetchall()
 
-    async def remove_keyword(self, keyword: str):
-        # Deletes a single keyword.
-        # Used by !forget <word>.
-        await self.conn.execute(
-            "DELETE FROM keywords WHERE keyword = ?", (keyword,)
-        )
-        await self.commit()
 
-    async def clear_keywords(self):
-        # Deletes ALL auto-learned keywords but keeps manual ones.
-        # Used by !forget (without arguments).
-        await self.conn.execute("DELETE FROM keywords WHERE is_manual = 0")
-        await self.commit()
-
-    async def decay_keywords(self, days: int = 7):
-        # Runs every 6 hours via the background task.
-        # If a keyword hasn't been seen in 7+ days, its frequency drops by 1.
-        # If frequency reaches 0, the keyword is deleted.
-        # This prevents stale topics from hanging around forever.
-        # Manual keywords (!remember) are exempt from decay.
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        await self.conn.execute(
-            "UPDATE keywords SET frequency = MAX(0, frequency - 1) WHERE last_seen < ? AND is_manual = 0",
-            (cutoff,),
-        )
-        await self.conn.execute("DELETE FROM keywords WHERE frequency <= 0")
-        await self.commit()
 
     async def get_or_create_session(self, channel_id: str):
         # Gets or creates a session row for a channel.

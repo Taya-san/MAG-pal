@@ -280,14 +280,6 @@ class Responder:
                 "content": "Recent conversation:\n" + "\n".join(ctx_lines),
             })
 
-        # === 3. KEYWORD HINTS ===
-        keywords = await self.db.get_top_keywords(10)
-        if keywords:
-            kw_list = [k["keyword"] for k in keywords]
-            context.append({
-                "role": "system",
-                "content": f"Topics you've discussed: {', '.join(kw_list)}",
-            })
 
         # === 4. SESSION SUMMARY (long-term memory) ===
         session = await self.db.get_or_create_session(str(message.channel.id))

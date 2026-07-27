@@ -13,12 +13,10 @@ import logging
 import time
 from collections import deque
 
-from datetime import datetime, timezone
 import discord
 from discord.ext import tasks
 from config import Config
 from db import Database
-from keywords import extract_keywords
 from openrouter import OpenRouterClient
 from responder import Responder, HeuristicResult
 from memory_store import MemoryStore
@@ -82,7 +80,7 @@ class PalBot(discord.Client):
         self.config = config
         
         # === DEPENDENCIES ===
-        # Database (db.py) - stores messages, keywords, sessions, aliases.
+        # Database (db.py) - stores messages, sessions, aliases.
         # Uses aiosqlite (async SQLite) so it doesn't block the event loop.
         self.db = Database(config.DB_PATH)
         
@@ -191,7 +189,7 @@ class PalBot(discord.Client):
         If we closed the DB last, a background task might try to write
         to a closed connection and crash.
         """
-        self.keyword_decay_loop.cancel()
+
         await self.db.close()
         self.openrouter.close()
         await super().close()
