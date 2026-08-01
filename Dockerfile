@@ -1,6 +1,5 @@
 # MAG-pal — Discord AI pal bot
-# Includes an agent-ready toolset (bash, curl, nmap, build tools, runtimes)
-# for future AI tool-calling / MCP features.
+# Agent-ready toolset for future AI tool-calling / MCP features.
 
 FROM python:3.14-slim
 
@@ -10,7 +9,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tini \
     ca-certificates \
     bash \
-    coreutils \
     procps \
     file \
     # --- Network ---
@@ -23,13 +21,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     openssl \
     netcat-openbsd \
     traceroute \
-    tcpdump \
     nmap \
     # --- File ops ---
     unzip \
     zip \
     xz-utils \
-    bzip2 \
     rsync \
     tree \
     diffutils \
@@ -37,24 +33,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     lsof \
     # --- Search & text ---
     ripgrep \
-    fd-find \
     jq \
     gawk \
-    sed \
-    # --- Build tools ---
+    # --- Build tools (needed for pip sdist fallbacks) ---
     build-essential \
-    make \
-    cmake \
     pkg-config \
-    gdb \
     # --- Git ---
     git \
-    git-lfs \
-    gh \
     # --- Runtimes ---
     python3-venv \
-    nodejs \
-    npm \
     # --- Diagnostics ---
     strace \
     htop \
