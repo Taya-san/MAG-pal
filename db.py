@@ -1,3 +1,4 @@
+from __future__ import annotations
 # db.py
 # SQLite database layer using aiosqlite (async version of sqlite3).
 # Stores: your messages, extracted keywords, and per-channel session data.
@@ -10,8 +11,11 @@
 # All SQL uses parameterized queries (? placeholders).
 # This prevents SQL injection attacks.
 
+
 import aiosqlite
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
+
+__all__ = ["Database"]
 
 
 class Database:
@@ -87,6 +91,18 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_keywords_freq
                 ON keywords(frequency DESC);
             -- ^ Speeds up: "give me the top 10 most frequent keywords"
+
+            CREATE TABLE IF NOT EXISTS user_aliases (
+                id INTEGER PRIMARY KEY,
+                owner_id INTEGER NOT NULL,
+                alias TEXT NOT NULL,
+                resolves_to INTEGER NOT NULL,
+                UNIQUE(owner_id, alias)
+            );
+            -- ^ Per-user private nickname mappings.
+            --   owner_id = who OWNS this alias entry
+            --   alias = what they call this person ("bintang")
+            --   resolves_to = target owner_id — whose data to pull
         """)
         await self.conn.commit()
 
@@ -127,69 +143,10 @@ class Database:
         rows = await cursor.fetchall()
         return list(reversed(rows))
 
-    async def upsert_keyword(self, keyword: str, manual: bool = False):
-        # "Update or Insert" a keyword.
-        # If the keyword already exists: increment frequency, update last_seen.
-        # If it's new: insert with frequency=1.
-        # manual=True means the user used !remember (never decays).
-        now = datetime.now(timezone.utc).isoformat()
-        await self.conn.execute(
-            """
-            INSERT INTO keywords (keyword, frequency, is_manual, last_seen)
-            VALUES (?, 1, ?, ?)
-            ON CONFLICT(keyword) DO UPDATE SET
-                frequency = frequency + 1,
-                is_manual = CASE WHEN ? THEN 1 ELSE is_manual END,
-                last_seen = ?
-        """,
-            (keyword, 1 if manual else 0, now, manual, now),
-        )
-        await self.commit()
 
-    async def get_top_keywords(self, limit: int = 20):
-        # Returns the most frequent keywords.
-        # Used in the AI prompt to remind it what you talk about.
-        cursor = await self.conn.execute(
-            "SELECT keyword, frequency, is_manual FROM keywords ORDER BY frequency DESC LIMIT ?",
-            (limit,),
-        )
-        return await cursor.fetchall()
 
-    async def get_all_keywords(self):
-        # Returns every keyword ordered by frequency.
-        # Used by the !kw command.
-        cursor = await self.conn.execute(
-            "SELECT keyword, frequency, is_manual, last_seen FROM keywords ORDER BY frequency DESC"
-        )
-        return await cursor.fetchall()
 
-    async def remove_keyword(self, keyword: str):
-        # Deletes a single keyword.
-        # Used by !forget <word>.
-        await self.conn.execute(
-            "DELETE FROM keywords WHERE keyword = ?", (keyword,)
-        )
-        await self.commit()
 
-    async def clear_keywords(self):
-        # Deletes ALL auto-learned keywords but keeps manual ones.
-        # Used by !forget (without arguments).
-        await self.conn.execute("DELETE FROM keywords WHERE is_manual = 0")
-        await self.commit()
-
-    async def decay_keywords(self, days: int = 7):
-        # Runs every 6 hours via the background task.
-        # If a keyword hasn't been seen in 7+ days, its frequency drops by 1.
-        # If frequency reaches 0, the keyword is deleted.
-        # This prevents stale topics from hanging around forever.
-        # Manual keywords (!remember) are exempt from decay.
-        cutoff = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
-        await self.conn.execute(
-            "UPDATE keywords SET frequency = MAX(0, frequency - 1) WHERE last_seen < ? AND is_manual = 0",
-            (cutoff,),
-        )
-        await self.conn.execute("DELETE FROM keywords WHERE frequency <= 0")
-        await self.commit()
 
     async def get_or_create_session(self, channel_id: str):
         # Gets or creates a session row for a channel.
@@ -222,14 +179,15 @@ class Database:
 
     async def update_session_summary(self, channel_id: str, summary: str):
         # Saves an AI-generated summary of old conversation.
-        # Future feature: every 100 messages, summarize and store here.
-        # The summary is fed into the AI prompt for long-term memory.
+        # Resets message_count to 0 so the next cycle starts fresh
+        # and only the latest SUMMARY_INTERVAL messages are fetched.
         await self.conn.execute(
             """
             INSERT INTO sessions (channel_id, summary, message_count)
             VALUES (?, ?, 0)
             ON CONFLICT(channel_id) DO UPDATE SET
                 summary = ?,
+                message_count = 0,
                 last_updated = CURRENT_TIMESTAMP
         """,
             (channel_id, summary, summary),
@@ -237,11 +195,42 @@ class Database:
         await self.commit()
 
     async def get_message_count(self):
-        # Returns total number of stored messages across all channels.
-        # Used by !stats.
         cursor = await self.conn.execute("SELECT COUNT(*) FROM messages")
         row = await cursor.fetchone()
         return row[0] if row else 0
+
+    async def add_alias(self, owner_id: int, alias: str, resolves_to: int):
+        """Add a private nickname mapping. owner_id=who owns it, resolves_to=who it refers to."""
+        await self.conn.execute(
+            "INSERT OR REPLACE INTO user_aliases (owner_id, alias, resolves_to) VALUES (?, ?, ?)",
+            (owner_id, alias.lower().strip(), resolves_to),
+        )
+        await self.commit()
+
+    async def remove_alias(self, owner_id: int, alias: str):
+        """Remove a nickname from the owner's private alias table."""
+        await self.conn.execute(
+            "DELETE FROM user_aliases WHERE owner_id = ? AND alias = ?",
+            (owner_id, alias.lower().strip()),
+        )
+        await self.commit()
+
+    async def resolve_alias(self, owner_id: int, alias: str) -> int | None:
+        """Look up who a nickname resolves to. Returns target owner_id or None."""
+        cursor = await self.conn.execute(
+            "SELECT resolves_to FROM user_aliases WHERE owner_id = ? AND alias = ?",
+            (owner_id, alias.lower().strip()),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else None
+
+    async def get_aliases(self, owner_id: int):
+        """Return all alias mappings for an owner as list of {alias, resolves_to}."""
+        cursor = await self.conn.execute(
+            "SELECT alias, resolves_to FROM user_aliases WHERE owner_id = ?",
+            (owner_id,),
+        )
+        return await cursor.fetchall()
 
     async def clear_messages(self):
         # Deletes ALL messages and resets all session data.

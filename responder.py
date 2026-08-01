@@ -1,3 +1,4 @@
+from __future__ import annotations
 # responder.py
 # THE BRAIN — decides WHEN to respond and builds the prompt.
 #
@@ -12,10 +13,14 @@
 #   Assembles system instructions + conversation history + keywords
 #   + current message into the format OpenRouter expects.
 
+
 import logging
 import re
-from datetime import datetime, timezone
 from enum import Enum
+
+from datetime import datetime, timezone
+
+__all__ = ["Responder"]
 
 logger = logging.getLogger("palbot")
 
@@ -49,13 +54,11 @@ class Responder:
     # The core decision engine.
     # Receives a message, checks heuristics, and returns what to do.
 
-    def __init__(self, config, db, openrouter):
-        # config: the Config object (personality, name, etc.)
-        # db: Database instance (for fetching history & keywords)
-        # openrouter: OpenRouterClient (only used for summarization in future)
+    def __init__(self, config, db, openrouter, memory_store=None):
         self.config = config
         self.db = db
         self.openrouter = openrouter
+        self.memory_store = memory_store
 
     def is_question(self, text: str) -> bool:
         # Three-tier question detection:
@@ -113,7 +116,7 @@ class Responder:
         words = content.split()
 
         # Signal 3: Bot name as the first word
-        if words and words[0].strip(".,!?;:") in (name_lower, "pal"):
+        if words and words[0].strip("\"'.,!?;:") in (name_lower, "pal"):
             return True
 
         # Signal 4: Bot name anywhere in the message
@@ -121,7 +124,7 @@ class Responder:
             return True
 
         # Signal 5: "pal" mentioned
-        if " pal " in f" {content} ":
+        if re.search(r"\bpal\b", content):
             return True
 
         return False
@@ -154,7 +157,7 @@ class Responder:
         # - Short agreements ("ok", "yeah", "nice")
 
         stripped = text.strip().lower()
-        if len(stripped.split()) <= 2 and stripped.rstrip("!.") in _SHORT_GREETINGS:
+        if len(stripped.split()) <= 2 and stripped.rstrip("!.,?;:") in _SHORT_GREETINGS:
             return True
         return False
 
@@ -218,7 +221,8 @@ class Responder:
             f"- Keep responses {self.config.RESPONSE_LENGTH}.\n"
             "- Use casual language. Be natural.\n"
             "- Don't enumerate or use bullet points unless asked.\n"
-            "- Don't apologize unless you actually messed up."
+            "- Don't apologize unless you actually messed up.\n"
+            f"- Use modern teenager {self.config.MAG_LANG} language."
         )
 
         if include_silent:
@@ -231,8 +235,8 @@ class Responder:
                 "- If they're addressing you, asking something, or continuing a "
                 "chat -> respond naturally.\n"
                 "- If they're talking to others, stating a fact, or silence is "
-                "better -> output exactly '<SILENT>' with no other text.\n"
-                "- When unsure, prefer silence."
+                "better -> add exactly '<SILENT>' in to your output to decide to be silent and not responding.\n"
+                "- When unsure, always prefer silence."
             )
 
         return prompt
@@ -275,14 +279,6 @@ class Responder:
                 "content": "Recent conversation:\n" + "\n".join(ctx_lines),
             })
 
-        # === 3. KEYWORD HINTS ===
-        keywords = await self.db.get_top_keywords(10)
-        if keywords:
-            kw_list = [k["keyword"] for k in keywords]
-            context.append({
-                "role": "system",
-                "content": f"Topics you've discussed: {', '.join(kw_list)}",
-            })
 
         # === 4. SESSION SUMMARY (long-term memory) ===
         session = await self.db.get_or_create_session(str(message.channel.id))
@@ -317,19 +313,72 @@ class Responder:
         # === 6. FULL PROMPT ===
         return [system] + context + [boundary, user_msg]
 
+    def build_summary_prompt(self, messages: list) -> list:
+        # Builds a prompt for summarizing a batch of conversation history.
+        # The result gets stored in sessions.summary and included in
+        # future conversation prompts for long-term memory.
+        # messages is a list of Row objects from get_recent_messages.
+
+        system_prompt = (
+            f"Summarize the following Discord conversation between "
+            f"{self.config.USER_NAME} and {self.config.PAL_NAME}.\n\n"
+            "Focus on:\n"
+            "- Main topics discussed\n"
+            "- Questions asked\n"
+            "- Interests shown\n"
+            "- Decisions or conclusions\n\n"
+            "Keep the summary under 200 words and write in present tense. "
+            "Output ONLY the summary text, no commentary."
+        )
+
+        lines = []
+        for row in messages:
+            speaker = (
+                "You" if row["author"] == "bot" else self.config.USER_NAME
+            )
+            lines.append(f"{speaker}: {row['content']}")
+
+        conversation = "\n".join(lines)
+
+        return [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Conversation:\n{conversation}\n\nSummary:"},
+        ]
+
+    def build_continuation_prompt(self, original_prompt, partial_reasoning, injected_context):
+        """Build a re-prompt with injected memory context for mid-stream intervention.
+
+        Preserves the original prompt, appends partial reasoning as an assistant
+        message (what the AI was thinking), and adds the injected memory block as
+        a system message instructing the AI to incorporate it and continue."""
+        prompt = list(original_prompt)
+        prompt.append({
+            "role": "assistant",
+            "content": partial_reasoning,
+        })
+        prompt.append({
+            "role": "system",
+            "content": (
+                "[New information to incorporate in your reasoning:\n"
+                f"{injected_context}\n]\n"
+                "Continue your reasoning naturally, incorporating this information."
+            ),
+        })
+        return prompt
+
     def parse_response(self, response_text: str) -> tuple[bool, str]:
         # Parses the AI's response to check for <SILENT>.
         #
-        # If the AI starts with <SILENT> (case-insensitive):
+        # If <SILENT> appears ANYWHERE in the response (case-insensitive):
         #   return (False, "") — don't send anything to Discord
         #
-        # If the AI output actual text:
+        # If the AI output actual text without <SILENT>:
         #   return (True, text) — send this to Discord
         #
         # The <SILENT> token is the AI's way of saying "this message
         # wasn't for me, I'm not going to respond."
 
         text = response_text.strip()
-        if text.upper().startswith("<SILENT>"):
+        if "<SILENT>" in text.upper():
             return False, ""
         return True, text

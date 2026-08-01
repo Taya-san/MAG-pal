@@ -1,3 +1,4 @@
+from __future__ import annotations
 """
 MAG-pal Diagnostic Test
 Measures RAM/CPU, tests all modules independently,
@@ -47,7 +48,6 @@ if __name__ == "__main__":
     t0 = time.time()
     from config import Config
     from db import Database
-    from keywords import extract_keywords
     from openrouter import OpenRouterClient
     from responder import Responder, HeuristicResult
     from bot import PalBot

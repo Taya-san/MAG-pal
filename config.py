@@ -1,96 +1,127 @@
-# config.py
-# Loads all settings from the .env file and validates them.
-# Every config value has a default so the bot won't crash
-# if something is missing from .env — except the 3 required fields.
+"""
+Load and validate bot configuration from environment variables.
+
+Every config value has a sensible default so the bot won't crash
+if something is missing from .env — except the 3 required fields.
+Access values like: config.DISCORD_TOKEN, config.PAL_NAME, etc.
+"""
+
+from __future__ import annotations
+
 
 import os
-from dotenv import load_dotenv
+from dataclasses import dataclass
 
-# Load variables from .env into os.environ
-# This runs once when the module is imported
-load_dotenv()
+__all__ = ["Config"]
+# Docs: https://github.com/theskumar/python-dotenv
 
 
+@dataclass(frozen=True)
 class Config:
-    # Holds all bot configuration in one place
-    # Access values like: config.DISCORD_TOKEN, config.PAL_NAME, etc.
+    """Immutable bot configuration loaded from environment.
 
-    def __init__(self):
-        # === REQUIRED: bot will crash at startup if these are missing ===
+    Use Config.from_env() to create an instance from a .env file.
+    The load_dotenv() call must happen before this (in main.py).
+    All defaults are set here; validate() checks required fields.
+    """
 
-        # Discord bot token from https://discord.com/developers/applications
-        self.DISCORD_TOKEN = os.getenv("DISCORD_TOKEN", "")
+    # === REQUIRED ===
+    disc_token: str
+    openrouter_key: str
+    owner_id: int
 
-        # OpenRouter API key from https://openrouter.ai/keys
-        self.OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY", "")
+    # === PERSONALITY ===
+    pal_name: str
+    user_name: str
+    personality: str
+    interests: str
+    mag_lang: str
+    response_length: str
 
-        # Your Discord user ID (right-click your name → Copy ID)
-        # Only this user's messages will be processed
+    # === AI MODEL ===
+    model: str
+    max_tokens: int
+    temperature: float
+
+    # === BEHAVIOR ===
+    debug: bool
+    summarize: bool
+    summary_interval: int
+    db_path: str
+    heuristic_continuation_minutes: int
+
+    # === MULTI-USER (optional) ===
+    owner_names: dict[int, str]
+    name_to_owner: dict[str, int]
+
+    # === LEGACY ALIASES (for backward compatibility) ===
+    _LEGACY_ALIASES = {
+        'DISCORD_TOKEN': 'disc_token', 'OPENROUTER_API_KEY': 'openrouter_key',
+        'MODEL': 'model', 'MAX_TOKENS': 'max_tokens', 'TEMPERATURE': 'temperature',
+        'OWNER_ID': 'owner_id', 'PAL_NAME': 'pal_name', 'USER_NAME': 'user_name',
+        'PERSONALITY': 'personality', 'INTERESTS': 'interests', 'MAG_LANG': 'mag_lang',
+        'RESPONSE_LENGTH': 'response_length', 'DEBUG': 'debug',
+        'SUMMARIZE': 'summarize', 'SUMMARY_INTERVAL': 'summary_interval',
+        'DB_PATH': 'db_path', 'HEURISTIC_CONTINUATION_MINUTES': 'heuristic_continuation_minutes',
+        'OWNER_NAMES': 'owner_names', 'NAME_TO_OWNER': 'name_to_owner',
+    }
+
+    def __getattr__(self, name):
+        if name in self._LEGACY_ALIASES:
+            return getattr(self, self._LEGACY_ALIASES[name])
+        raise AttributeError(f"'Config' object has no attribute '{name}'")
+
+
+    @classmethod
+    def from_env(cls) -> Config:
+        """Build a frozen Config from environment variables.
+
+        Call this AFTER load_dotenv() has been called (typically in main.py).
+        """
         raw_id = os.getenv("OWNER_ID", "0")
-        self.OWNER_ID = int(raw_id) if raw_id.strip() else 0
+        owner_id = int(raw_id) if raw_id.strip() else 0
 
-        # === PERSONALITY: controls how the AI talks ===
+        # Parse OWNER_NAMES: "12345:taya,67890:bob"
+        raw_names = os.getenv("OWNER_NAMES", "")
+        owner_names: dict[int, str] = {}
+        if raw_names:
+            for pair in raw_names.split(","):
+                pair = pair.strip()
+                if ":" in pair:
+                    uid, name = pair.split(":", 1)
+                    owner_names[int(uid.strip())] = name.strip()
+        name_to_owner = {v: k for k, v in owner_names.items()}
 
-        # The bot's name — used in prompts and detection
-        self.PAL_NAME = os.getenv("PAL_NAME", "MAG")
-
-        # What the AI calls you in its system prompt
-        self.USER_NAME = os.getenv("USER_NAME", "User")
-
-        # Describe the bot's personality (e.g. "chill, sarcastic, supportive")
-        self.PERSONALITY = os.getenv("PERSONALITY", "chill, curious, supportive")
-
-        # Topics you're interested in (helps the AI know what you like)
-        self.INTERESTS = os.getenv("INTERESTS", "")
-
-        # How long responses should be: "short", "medium", "long", or "1-2 sentences"
-        self.RESPONSE_LENGTH = os.getenv("RESPONSE_LENGTH", "short")
-
-        # === AI MODEL: which LLM to use via OpenRouter ===
-
-        # Model identifier on OpenRouter
-        # "openrouter/free" auto-routes to best free model
-        # Other examples: "deepseek/deepseek-r1:free", "meta-llama/llama-3.3-70b-instruct:free"
-        self.MODEL = os.getenv("MODEL", "openrouter/free")
-
-        # Max tokens the AI can generate per response
-        # Higher = longer responses but costs more
-        self.MAX_TOKENS = int(os.getenv("MAX_TOKENS", "500"))
-
-        # Creativity: 0.0 = very predictable, 1.0 = very random
-        self.TEMPERATURE = float(os.getenv("TEMPERATURE", "0.7"))
-
-        # === BEHAVIOR: how the bot acts ===
-
-        # Enable verbose logging to palbot.log
-        # Shows every prompt, AI response, latency, etc.
-        self.DEBUG = os.getenv("DEBUG", "false").lower() == "true"
-
-        # Optional: summarize old messages to save context
-        # (not yet fully implemented — placeholder for future)
-        self.SUMMARIZE = os.getenv("SUMMARIZE", "false").lower() == "true"
-
-        # Where to store the SQLite database file
-        self.DB_PATH = os.getenv("DB_PATH", "palbot.db")
-
-        # How many minutes of silence before a continuation expires
-        # If you talk again within this window, the bot treats it
-        # as continuing the conversation
-        self.HEURISTIC_CONTINUATION_MINUTES = int(
-            os.getenv("HEURISTIC_CONTINUATION_MINUTES", "2")
+        return cls(
+            disc_token=os.getenv("DISCORD_TOKEN", ""),
+            openrouter_key=os.getenv("OPENROUTER_API_KEY", ""),
+            owner_id=owner_id,
+            pal_name=os.getenv("PAL_NAME", "MAG"),
+            user_name=os.getenv("USER_NAME", "User"),
+            personality=os.getenv("PERSONALITY", "chill, curious, supportive"),
+            interests=os.getenv("INTERESTS", ""),
+            mag_lang=os.getenv("MAG_LANG", ""),
+            response_length=os.getenv("RESPONSE_LENGTH", "short"),
+            model=os.getenv("MODEL", "openrouter/free"),
+            max_tokens=int(os.getenv("MAX_TOKENS", "500")),
+            temperature=float(os.getenv("TEMPERATURE", "0.7")),
+            debug=os.getenv("DEBUG", "false").lower() == "true",
+            summarize=os.getenv("SUMMARIZE", "false").lower() == "true",
+            summary_interval=int(os.getenv("SUMMARY_INTERVAL", "100")),
+            db_path=os.getenv("DB_PATH", "palbot.db"),
+            heuristic_continuation_minutes=int(os.getenv("HEURISTIC_CONTINUATION_MINUTES", "2")),
+            owner_names=owner_names,
+            name_to_owner=name_to_owner,
         )
 
-    def validate(self):
-        # Called at startup. If required config is missing,
-        # raises ValueError with a clear message.
-        # This fails FAST — better than mysterious runtime errors.
-
+    def validate(self) -> None:
+        """Raise ValueError if required fields are missing."""
         missing = []
-        if not self.DISCORD_TOKEN:
+        if not self.disc_token:
             missing.append("DISCORD_TOKEN")
-        if not self.OPENROUTER_API_KEY:
+        if not self.openrouter_key:
             missing.append("OPENROUTER_API_KEY")
-        if self.OWNER_ID == 0:
+        if self.owner_id == 0:
             missing.append("OWNER_ID")
         if missing:
             raise ValueError(

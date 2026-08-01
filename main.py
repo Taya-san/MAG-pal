@@ -1,3 +1,4 @@
+from __future__ import annotations
 # main.py
 # ENTRY POINT — run this to start the bot.
 #
@@ -40,10 +41,12 @@ def setup_logging(debug: bool):
 
 
 def main():
-    # 1. Load and validate config
-    # Config() reads .env automatically via python-dotenv.
-    # validate() raises ValueError if required fields are missing.
-    config = Config()
+    # 1. Load .env into os.environ
+    from dotenv import load_dotenv  # Docs: https://github.com/theskumar/python-dotenv
+    load_dotenv()
+
+    # 2. Load and validate config
+    config = Config.from_env()
     config.validate()
 
     # 2. Set up logging (after config so we know the debug setting)
