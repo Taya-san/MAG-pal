@@ -1,5 +1,7 @@
 # MAG-pal
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 Personal Discord AI pal bot with adaptive response system, hierarchical long-term memory, and real-time streaming intervention.
 
 ## How It Works
@@ -225,3 +227,7 @@ python -c "from stream_intervention import *; ..."
 source ai_stuff/rag_env/bin/activate
 python tests/test_synthetic.py
 ```
+
+## License
+
+MIT License — see [LICENSE](LICENSE).
